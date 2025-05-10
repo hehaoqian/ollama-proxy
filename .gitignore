@@ -1,2 +1,8 @@
 /target
 /.history
+*.backup
+*.bak
+*.fixed
+*.new
+*.sh
+*.log
