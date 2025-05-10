@@ -10,10 +10,9 @@ use serde::Serialize;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
-use tokio::sync::Mutex;
+use tokio::sync::mpsc::{self, Sender};
 
 // A simple type alias for convenience
 type BoxBody = http_body_util::combinators::BoxBody<Bytes, hyper::Error>;
@@ -41,11 +40,15 @@ struct Args {
 
 // Logger that can write to both console and file
 struct Logger {
-    log_file: Option<Mutex<File>>,
+    log_sender: Sender<String>,
 }
 
 impl Logger {
     async fn new(log_path: Option<PathBuf>) -> Self {
+        // Create a channel for logging messages
+        let (log_sender, mut log_receiver) = mpsc::channel::<String>(100);
+
+        // Open log file if path provided
         let log_file = if let Some(path) = log_path {
             match tokio::fs::OpenOptions::new()
                 .create(true)
@@ -53,7 +56,7 @@ impl Logger {
                 .open(path)
                 .await
             {
-                Ok(file) => Some(Mutex::new(file)),
+                Ok(file) => Some(file),
                 Err(e) => {
                     eprintln!("Error opening log file: {}", e);
                     None
@@ -63,20 +66,37 @@ impl Logger {
             None
         };
 
-        Self { log_file }
+        // Spawn a background task to handle log messages
+        tokio::spawn(async move {
+            let mut file = log_file;
+
+            while let Some(message) = log_receiver.recv().await {
+                // Always print to console
+                println!("{}", message);
+
+                // Also log to file if configured
+                if let Some(ref mut f) = file {
+                    let message_with_newline = format!("{}\n", message);
+                    // Ignore error if we can't write to the file
+                    if let Err(e) = f.write_all(message_with_newline.as_bytes()).await {
+                        eprintln!("Error writing to log file: {}", e);
+                    }
+                    // Try to flush, but ignore errors
+                    let _ = f.flush().await;
+                }
+            }
+        });
+
+        Self { log_sender }
     }
 
     async fn log(&self, message: &str) {
-        // Always print to console
-        println!("{}", message);
-
-        // Also log to file if configured
-        if let Some(file_mutex) = &self.log_file {
-            let message = format!("{}\n", message);
-            let mut file = file_mutex.lock().await;
-            // Ignore error if we can't write to the file
-            let _ = file.write_all(message.as_bytes()).await;
-            let _ = file.flush().await;
+        // Send message to the logger task
+        // If send fails, just print to stderr and continue
+        if let Err(e) = self.log_sender.send(message.to_string()).await {
+            eprintln!("Failed to send log message: {}", e);
+            // Fallback to direct console output
+            println!("{}", message);
         }
     }
 }
@@ -274,7 +294,7 @@ fn handle_not_found() -> Response<BoxBody> {
 }
 
 // Check if request is authenticated - returns true if API key is not required or if it matches
-async fn is_authenticated(
+fn is_authenticated(
     req: &Request<hyper::body::Incoming>,
     ollama_config: &Arc<OllamaConfig>,
 ) -> bool {
@@ -326,9 +346,9 @@ async fn handle_generate_with_model_info(
     if let Some(ref body_bytes) = maybe_body_bytes {
         if let Ok(json) = serde_json::from_slice::<serde_json::Value>(body_bytes) {
             if let Some(model) = json.get("model").and_then(|m| m.as_str()) {
-                let is_unload_request = json.get("prompt").and_then(|p| p.as_str()).is_some_and(|p| p.is_empty())
+                let is_unload_request = json.get("prompt").and_then(|p| p.as_str()).is_some_and(str::is_empty)
                     && (json.get("options").and_then(|o| o.as_object()).and_then(|o| o.get("keep_alive"))
-                        .and_then(|k| k.as_i64()) == Some(0));
+                        .and_then(serde_json::Value::as_i64) == Some(0));
 
                 if is_unload_request {
                     ollama_config
@@ -360,22 +380,22 @@ async fn handle_generate_with_model_info(
         .expect("Failed to create request");
 
     // Forward the request directly to Ollama
-    match proxy_to_ollama(req, "/api/generate", ollama_config).await {
-        Ok(response) => response,
-        Err(_) => {
-            // Fallback to mock response if Ollama is unavailable
-            ollama_config
-                .logger
-                .log("Failed to get response from Ollama, using mock response")
-                .await;
-            let response = serde_json::json!({
-                "model": "unknown",
-                "created_at": Local::now().to_rfc3339(),
-                "response": "Mock response (Ollama server unavailable)",
-                "done": true
-            });
-            json_response(&response, StatusCode::OK)
-        }
+    // Forward the request directly to Ollama
+    if let Ok(response) = proxy_to_ollama(req, "/api/generate", ollama_config).await {
+        response
+    } else {
+        // Fallback to mock response if Ollama is unavailable
+        ollama_config
+            .logger
+            .log("Failed to get response from Ollama, using mock response")
+            .await;
+        let response = serde_json::json!({
+            "model": "unknown",
+            "created_at": Local::now().to_rfc3339(),
+            "response": "Mock response (Ollama server unavailable)",
+            "done": true
+        });
+        json_response(&response, StatusCode::OK)
     }
 }
 
@@ -476,13 +496,13 @@ async fn handle_authenticated_endpoint(
     operation_description: &str,
 ) -> Response<BoxBody> {
     // Check authentication
-    if !is_authenticated(&req, ollama_config).await {
+    if !is_authenticated(&req, ollama_config) {
         return handle_unauthorized();
     }
 
     ollama_config
         .logger
-        .log(&format!("Forwarding {} request to Ollama", operation_description))
+        .log(&format!("Forwarding {operation_description} request to Ollama"))
         .await;
 
     // Forward to Ollama server
@@ -491,7 +511,7 @@ async fn handle_authenticated_endpoint(
         .unwrap_or_else(|e| {
             Response::builder()
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(full(format!("Error: {}", e)))
+                .body(full(format!("Error: {e}")))
                 .unwrap()
         })
 }
@@ -523,16 +543,16 @@ where
         .expect("Failed to create request");
 
     // Forward the request directly to Ollama
-    match proxy_to_ollama(req, path, ollama_config).await {
-        Ok(response) => response,
-        Err(_) => {
-            // Fallback to mock response if Ollama is unavailable
-            ollama_config
-                .logger
-                .log("Failed to get response from Ollama, using fallback response")
-                .await;
-            fallback_generator()
-        }
+    // Forward the request directly to Ollama
+    if let Ok(response) = proxy_to_ollama(req, path, ollama_config).await {
+        response
+    } else {
+        // Fallback to mock response if Ollama is unavailable
+        ollama_config
+            .logger
+            .log("Failed to get response from Ollama, using fallback response")
+            .await;
+        fallback_generator()
     }
 }
 
