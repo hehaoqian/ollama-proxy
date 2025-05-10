@@ -7,7 +7,6 @@ use hyper::server::conn::http1;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -82,53 +81,6 @@ impl Logger {
     }
 }
 
-// API Models for Ollama-like interface
-#[derive(Serialize, Deserialize, Debug)]
-struct GenerateRequest {
-    model: String,
-    prompt: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    system: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    template: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    context: Option<Vec<i32>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    options: Option<HashMap<String, serde_json::Value>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    format: Option<String>,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-struct GenerateResponse {
-    model: String,
-    created_at: String,
-    response: String,
-    done: bool,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-struct ModelsResponse {
-    models: Vec<ModelInfo>,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-struct ModelInfo {
-    name: String,
-    modified_at: String,
-    size: u64,
-    digest: String,
-    details: ModelDetails,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-struct ModelDetails {
-    format: String,
-    family: String,
-    parameter_size: String,
-    quantization_level: String,
-}
-
 // Function to create a boxed response body from a string
 fn full<T: Into<Bytes>>(chunk: T) -> BoxBody {
     Full::new(chunk.into())
@@ -151,26 +103,6 @@ fn json_response<T: Serialize>(data: &T, status: StatusCode) -> Response<BoxBody
     }
 }
 
-// Parse request body as JSON
-async fn parse_body<T: for<'de> Deserialize<'de>>(body: hyper::body::Incoming) -> Option<T> {
-    match body.collect().await {
-        Ok(collected) => {
-            let bytes = collected.to_bytes();
-            match serde_json::from_slice::<T>(&bytes) {
-                Ok(parsed) => Some(parsed),
-                Err(e) => {
-                    eprintln!("Error parsing request body: {}", e);
-                    None
-                }
-            }
-        }
-        Err(e) => {
-            eprintln!("Error collecting request body: {}", e);
-            None
-        }
-    }
-}
-
 // Ollama server configuration
 struct OllamaConfig {
     base_url: String,
@@ -188,274 +120,17 @@ impl OllamaConfig {
     }
 }
 
-// Client for forwarding requests to Ollama
-async fn forward_to_ollama<T: Serialize, R: for<'de> Deserialize<'de>>(
-    config: &OllamaConfig,
-    endpoint: &str,
-    body: Option<&T>,
-) -> Option<R> {
-    use http_body_util::Full;
-    use hyper::Uri;
-    use hyper::body::Bytes;
-    use hyper_util::client::legacy::Client;
-    use hyper_util::rt::TokioExecutor;
-    use std::str::FromStr;
-
-    // Build the full URI
-    let uri_str = format!("{}{}", config.base_url, endpoint);
-    let uri = match Uri::from_str(&uri_str) {
-        Ok(uri) => uri,
-        Err(e) => {
-            let err_msg = format!("Error parsing URI {}: {}", uri_str, e);
-            config.logger.log(&err_msg).await;
-            return None;
-        }
-    };
-
-    // Create a regular HTTP client
-    let client = Client::builder(TokioExecutor::new()).build_http();
-
-    // Build request
-    let mut req_builder = Request::builder().uri(uri);
-
-    // Add JSON body if provided
-    let req = if let Some(data) = body {
-        match serde_json::to_string(data) {
-            Ok(json) => {
-                req_builder = req_builder
-                    .method(Method::POST)
-                    .header("Content-Type", "application/json");
-
-                match req_builder.body(Full::new(Bytes::from(json)).boxed()) {
-                    Ok(request) => request,
-                    Err(e) => {
-                        let err_msg = format!("Error creating request with body: {}", e);
-                        config.logger.log(&err_msg).await;
-                        return None;
-                    }
-                }
-            }
-            Err(e) => {
-                let err_msg = format!("Error serializing request body: {}", e);
-                config.logger.log(&err_msg).await;
-                return None;
-            }
-        }
-    } else {
-        // GET request with no body
-        match req_builder
-            .method(Method::GET)
-            .body(Full::<Bytes>::new(Bytes::new()).boxed())
-        {
-            Ok(request) => request,
-            Err(e) => {
-                let err_msg = format!("Error creating GET request: {}", e);
-                config.logger.log(&err_msg).await;
-                return None;
-            }
-        }
-    };
-
-    // Send the request
-    let res = match client.request(req).await {
-        Ok(res) => res,
-        Err(e) => {
-            let err_msg = format!("Error sending request to Ollama: {}", e);
-            config.logger.log(&err_msg).await;
-            return None;
-        }
-    };
-
-    // Check if successful
-    if !res.status().is_success() {
-        let err_msg = format!("Ollama API returned error status: {}", res.status());
-        config.logger.log(&err_msg).await;
-        return None;
-    }
-
-    // Parse response body
-    match BodyExt::collect(res.into_body()).await {
-        Ok(collected) => {
-            let bytes = collected.to_bytes();
-            match serde_json::from_slice::<R>(&bytes) {
-                Ok(parsed) => Some(parsed),
-                Err(e) => {
-                    let err_msg = format!("Error parsing Ollama response: {}", e);
-                    config.logger.log(&err_msg).await;
-                    None
-                }
-            }
-        }
-        Err(e) => {
-            let err_msg = format!("Error collecting Ollama response body: {}", e);
-            config.logger.log(&err_msg).await;
-            None
-        }
-    }
-}
-
-// Handle the /api/generate endpoint
-async fn handle_generate_endpoint(
-    req: Request<hyper::body::Incoming>,
-    ollama_config: &Arc<OllamaConfig>,
-) -> Response<BoxBody> {
-    if let Some(generate_req) = parse_body::<GenerateRequest>(req.into_body()).await {
-        // Check if this is a model unload request (empty prompt with keep_alive: 0)
-        let is_unload_request = generate_req.prompt.is_empty()
-            && generate_req.options.as_ref().map_or(false, |opts| {
-                opts.get("keep_alive")
-                    .map_or(false, |val| val.as_i64().map_or(false, |num| num == 0))
-            });
-
-        // Log appropriate message based on request type
-        if is_unload_request {
-            ollama_config
-                .logger
-                .log(&format!(
-                    "Unloading model from memory: {}",
-                    generate_req.model
-                ))
-                .await;
-        } else {
-            ollama_config
-                .logger
-                .log(&format!(
-                    "Forwarding generate request to Ollama for model: {}",
-                    generate_req.model
-                ))
-                .await;
-        }
-
-        // Forward to Ollama server
-        match forward_to_ollama::<GenerateRequest, GenerateResponse>(
-            ollama_config,
-            "/api/generate",
-            Some(&generate_req),
-        )
-        .await
-        {
-            Some(ollama_response) => json_response(&ollama_response, StatusCode::OK),
-            None => {
-                // Fallback to mock response if Ollama is unavailable
-                ollama_config
-                    .logger
-                    .log("Failed to get response from Ollama, using mock response")
-                    .await;
-                let response = GenerateResponse {
-                    model: generate_req.model,
-                    created_at: Local::now().to_rfc3339(),
-                    response: format!(
-                        "Mock response to: {} (Ollama server unavailable)",
-                        generate_req.prompt
-                    ),
-                    done: true,
-                };
-                json_response(&response, StatusCode::OK)
-            }
-        }
-    } else {
-        json_response(
-            &serde_json::json!({"error": "Invalid request format"}),
-            StatusCode::BAD_REQUEST,
-        )
-    }
-}
-
-// Handle the /api/tags endpoint
-async fn handle_tags_endpoint(ollama_config: &Arc<OllamaConfig>) -> Response<BoxBody> {
-    ollama_config
-        .logger
-        .log("Forwarding request to list models to Ollama")
-        .await;
-
-    // Forward to Ollama server
-    match forward_to_ollama::<(), ModelsResponse>(ollama_config, "/api/tags", None).await {
-        Some(ollama_response) => json_response(&ollama_response, StatusCode::OK),
-        None => {
-            // Fallback to mock response if Ollama is unavailable
-            ollama_config
-                .logger
-                .log("Failed to get response from Ollama, using mock response")
-                .await;
-            // Simulate a list of models
-            let models = ModelsResponse {
-                models: vec![
-                    ModelInfo {
-                        name: "llama2".to_string(),
-                        modified_at: "2023-08-02T17:02:23Z".to_string(),
-                        size: 3791730298,
-                        digest: "sha256:a2...".to_string(),
-                        details: ModelDetails {
-                            format: "gguf".to_string(),
-                            family: "llama".to_string(),
-                            parameter_size: "7B".to_string(),
-                            quantization_level: "Q4_0".to_string(),
-                        },
-                    },
-                    ModelInfo {
-                        name: "mistral".to_string(),
-                        modified_at: "2023-11-20T12:15:30Z".to_string(),
-                        size: 4356823129,
-                        digest: "sha256:b1...".to_string(),
-                        details: ModelDetails {
-                            format: "gguf".to_string(),
-                            family: "mistral".to_string(),
-                            parameter_size: "7B".to_string(),
-                            quantization_level: "Q5_K".to_string(),
-                        },
-                    },
-                ],
-            };
-            json_response(&models, StatusCode::OK)
-        }
-    }
-}
-
-// Handle the documentation endpoint
-fn handle_docs_endpoint() -> Response<BoxBody> {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header("Content-Type", "text/html")
-        .body(full(
-            "<html><body><h1>API Documentation</h1>
-            <p>This server implements an Ollama-like API, forwarding requests to an Ollama server</p>
-            <h2>Endpoints:</h2>
-            <ul>
-                <li><code>POST /api/generate</code> - Generate text from a model</li>
-                <li><code>GET /api/tags</code> - List available models</li>
-                <li><code>POST /api/create</code> - Create a new model (requires authentication)</li>
-                <li><code>POST /api/copy</code> - Copy a model (requires authentication)</li>
-                <li><code>DELETE /api/delete</code> - Delete a model (requires authentication)</li>
-                <li><code>POST /api/pull</code> - Pull a model (requires authentication)</li>
-                <li><code>POST /api/push</code> - Push a model (requires authentication)</li>
-            </ul>
-            <h2>Special Operations:</h2>
-            <ul>
-                <li><strong>Unload a model:</strong> To unload a model from memory, send a request to <code>POST /api/generate</code> with an empty prompt and <code>keep_alive: 0</code> in the options. Example:
-                <pre>{
-  \"model\": \"MODEL_NAME\",
-  \"prompt\": \"\",
-  \"options\": {
-    \"keep_alive\": 0
-  }
-}</pre>
-                </li>
-            </ul>
-            <h2>Authentication:</h2>
-            <p>For model management endpoints (create, copy, delete, pull, push), an API key is required.
-            Pass the API key in the Authorization header as:<br/>
-            <code>Authorization: Bearer YOUR_API_KEY</code></p>
-            </body></html>"
-        ))
-        .unwrap()
-}
-
 // Proxy an API request to Ollama
-async fn proxy_to_ollama(
-    req: Request<hyper::body::Incoming>,
+async fn proxy_to_ollama<B>(
+    req: Request<B>,
     path: &str,
     ollama_config: &Arc<OllamaConfig>,
-) -> Result<Response<BoxBody>, hyper::Error> {
+) -> Result<Response<BoxBody>, hyper::Error>
+where
+    B: hyper::body::Body + Send + 'static,
+    B::Data: Send,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>> + std::fmt::Debug,
+{
     ollama_config
         .logger
         .log(&format!(
@@ -470,7 +145,7 @@ async fn proxy_to_ollama(
     let maybe_body_bytes = match body.collect().await {
         Ok(collected) => Some(collected.to_bytes()),
         Err(e) => {
-            let err_msg = format!("Error collecting request body: {}", e);
+            let err_msg = format!("Error collecting request body: {:?}", e);
             ollama_config.logger.log(&err_msg).await;
             None
         }
@@ -626,7 +301,173 @@ fn handle_unauthorized() -> Response<BoxBody> {
         .unwrap()
 }
 
-// Handle model creation endpoint
+// Handle the /api/generate endpoint - Forward AS-IS to Ollama
+async fn handle_generate_endpoint(
+    req: Request<hyper::body::Incoming>,
+    ollama_config: &Arc<OllamaConfig>,
+) -> Response<BoxBody> {
+    // Try to examine the body to log info without consuming it
+    let (_parts, body) = req.into_parts();
+    let maybe_body_bytes = match body.collect().await {
+        Ok(collected) => Some(collected.to_bytes()),
+        Err(e) => {
+            let err_msg = format!("Error collecting request body for logging: {}", e);
+            ollama_config.logger.log(&err_msg).await;
+            None
+        }
+    };
+
+    // If we have the body bytes, try to log helpful information
+    if let Some(ref body_bytes) = maybe_body_bytes {
+        if let Ok(json) = serde_json::from_slice::<serde_json::Value>(body_bytes) {
+            if let Some(model) = json.get("model").and_then(|m| m.as_str()) {
+                let is_unload_request = json.get("prompt").and_then(|p| p.as_str()).map_or(false, |p| p.is_empty())
+                    && json.get("options").and_then(|o| o.as_object()).and_then(|o| o.get("keep_alive"))
+                        .and_then(|k| k.as_i64()).map_or(false, |k| k == 0);
+
+                if is_unload_request {
+                    ollama_config
+                        .logger
+                        .log(&format!("Unloading model from memory: {}", model))
+                        .await;
+                } else {
+                    ollama_config
+                        .logger
+                        .log(&format!("Forwarding generate request to Ollama for model: {}", model))
+                        .await;
+                }
+            }
+        }
+    }
+
+    // Create a new request with the body we read for Ollama
+    let req = Request::builder()
+        .uri(format!("{}/api/generate", ollama_config.base_url))
+        .method(Method::POST)
+        .body(Full::new(if let Some(bytes) = maybe_body_bytes {
+            bytes
+        } else {
+            Bytes::new()
+        }).boxed())
+        .expect("Failed to create request");
+
+    // Forward the request directly to Ollama
+    match proxy_to_ollama(req, "/api/generate", ollama_config).await {
+        Ok(response) => response,
+        Err(_) => {
+            // Fallback to mock response if Ollama is unavailable
+            ollama_config
+                .logger
+                .log("Failed to get response from Ollama, using mock response")
+                .await;
+            let response = serde_json::json!({
+                "model": "unknown",
+                "created_at": Local::now().to_rfc3339(),
+                "response": "Mock response (Ollama server unavailable)",
+                "done": true
+            });
+            json_response(&response, StatusCode::OK)
+        }
+    }
+}
+
+// Handle the /api/tags endpoint - Forward AS-IS to Ollama
+async fn handle_tags_endpoint(ollama_config: &Arc<OllamaConfig>) -> Response<BoxBody> {
+    ollama_config
+        .logger
+        .log("Forwarding request to list models to Ollama")
+        .await;
+
+    // Create a GET request with no body
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri(format!("{}/api/tags", ollama_config.base_url))
+        .body(Full::new(Bytes::new()).boxed())
+        .expect("Failed to create request");
+
+    // Forward the request directly to Ollama
+    match proxy_to_ollama(req, "/api/tags", ollama_config).await {
+        Ok(response) => response,
+        Err(_) => {
+            // Fallback to mock response if Ollama is unavailable
+            ollama_config
+                .logger
+                .log("Failed to get response from Ollama, using mock response")
+                .await;
+            // Simulate a list of models
+            let models = serde_json::json!({
+                "models": [
+                    {
+                        "name": "llama2",
+                        "modified_at": "2023-08-02T17:02:23Z",
+                        "size": 3791730298_u64,
+                        "digest": "sha256:a2...",
+                        "details": {
+                            "format": "gguf",
+                            "family": "llama",
+                            "parameter_size": "7B",
+                            "quantization_level": "Q4_0",
+                        },
+                    },
+                    {
+                        "name": "mistral",
+                        "modified_at": "2023-11-20T12:15:30Z",
+                        "size": 4356823129_u64,
+                        "digest": "sha256:b1...",
+                        "details": {
+                            "format": "gguf",
+                            "family": "mistral",
+                            "parameter_size": "7B",
+                            "quantization_level": "Q5_K",
+                        },
+                    },
+                ],
+            });
+            json_response(&models, StatusCode::OK)
+        }
+    }
+}
+
+// Handle the documentation endpoint
+fn handle_docs_endpoint() -> Response<BoxBody> {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "text/html")
+        .body(full(
+            "<html><body><h1>API Documentation</h1>
+            <p>This server implements an Ollama-like API, forwarding requests to an Ollama server</p>
+            <h2>Endpoints:</h2>
+            <ul>
+                <li><code>POST /api/generate</code> - Generate text from a model</li>
+                <li><code>GET /api/tags</code> - List available models</li>
+                <li><code>POST /api/create</code> - Create a new model (requires authentication)</li>
+                <li><code>POST /api/copy</code> - Copy a model (requires authentication)</li>
+                <li><code>DELETE /api/delete</code> - Delete a model (requires authentication)</li>
+                <li><code>POST /api/pull</code> - Pull a model (requires authentication)</li>
+                <li><code>POST /api/push</code> - Push a model (requires authentication)</li>
+            </ul>
+            <h2>Special Operations:</h2>
+            <ul>
+                <li><strong>Unload a model:</strong> To unload a model from memory, send a request to <code>POST /api/generate</code> with an empty prompt and <code>keep_alive: 0</code> in the options. Example:
+                <pre>{
+  \"model\": \"MODEL_NAME\",
+  \"prompt\": \"\",
+  \"options\": {
+    \"keep_alive\": 0
+  }
+}</pre>
+                </li>
+            </ul>
+            <h2>Authentication:</h2>
+            <p>For model management endpoints (create, copy, delete, pull, push), an API key is required.
+            Pass the API key in the Authorization header as:<br/>
+            <code>Authorization: Bearer YOUR_API_KEY</code></p>
+            </body></html>"
+        ))
+        .unwrap()
+}
+
+// Handle model creation endpoint - Forward AS-IS to Ollama
 async fn handle_create_model_endpoint(
     req: Request<hyper::body::Incoming>,
     ollama_config: &Arc<OllamaConfig>,
@@ -652,7 +493,7 @@ async fn handle_create_model_endpoint(
         })
 }
 
-// Handle model copy endpoint
+// Handle model copy endpoint - Forward AS-IS to Ollama
 async fn handle_copy_model_endpoint(
     req: Request<hyper::body::Incoming>,
     ollama_config: &Arc<OllamaConfig>,
@@ -678,7 +519,7 @@ async fn handle_copy_model_endpoint(
         })
 }
 
-// Handle model delete endpoint
+// Handle model delete endpoint - Forward AS-IS to Ollama
 async fn handle_delete_model_endpoint(
     req: Request<hyper::body::Incoming>,
     ollama_config: &Arc<OllamaConfig>,
@@ -704,7 +545,7 @@ async fn handle_delete_model_endpoint(
         })
 }
 
-// Handle model pull endpoint
+// Handle model pull endpoint - Forward AS-IS to Ollama
 async fn handle_pull_model_endpoint(
     req: Request<hyper::body::Incoming>,
     ollama_config: &Arc<OllamaConfig>,
@@ -730,7 +571,7 @@ async fn handle_pull_model_endpoint(
         })
 }
 
-// Handle model push endpoint
+// Handle model push endpoint - Forward AS-IS to Ollama
 async fn handle_push_model_endpoint(
     req: Request<hyper::body::Incoming>,
     ollama_config: &Arc<OllamaConfig>,
