@@ -5,7 +5,8 @@ use clap::Parser;
 use http_body_util::{BodyExt, Full};
 use hyper::server::conn::http1;
 use hyper::{Method, Request, Response, StatusCode};
-use hyper_util::rt::TokioIo;
+use hyper_util::client::legacy::Client;
+use hyper_util::rt::{TokioExecutor, TokioIo};
 use serde::Serialize;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -58,7 +59,7 @@ impl Logger {
             {
                 Ok(file) => Some(file),
                 Err(e) => {
-                    eprintln!("Error opening log file: {}", e);
+                    eprintln!("Error opening log file: {e}");
                     None
                 }
             }
@@ -72,14 +73,14 @@ impl Logger {
 
             while let Some(message) = log_receiver.recv().await {
                 // Always print to console
-                println!("{}", message);
+                println!("{message}");
 
                 // Also log to file if configured
                 if let Some(ref mut f) = file {
-                    let message_with_newline = format!("{}\n", message);
+                    let message_with_newline = format!("{message}\n");
                     // Ignore error if we can't write to the file
                     if let Err(e) = f.write_all(message_with_newline.as_bytes()).await {
-                        eprintln!("Error writing to log file: {}", e);
+                        eprintln!("Error writing to log file: {e}");
                     }
                     // Try to flush, but ignore errors
                     let _ = f.flush().await;
@@ -94,9 +95,9 @@ impl Logger {
         // Send message to the logger task
         // If send fails, just print to stderr and continue
         if let Err(e) = self.log_sender.send(message.to_string()).await {
-            eprintln!("Failed to send log message: {}", e);
+            eprintln!("Failed to send log message: {e}");
             // Fallback to direct console output
-            println!("{}", message);
+            println!("{message}");
         }
     }
 }
@@ -171,21 +172,19 @@ where
     let maybe_body_bytes = match body.collect().await {
         Ok(collected) => Some(collected.to_bytes()),
         Err(e) => {
-            let err_msg = format!("Error collecting request body: {:?}", e);
+            let err_msg = format!("Error collecting request body: {e:?}");
             ollama_config.logger.log(&err_msg).await;
             None
         }
     };
 
     // Build a client
-    use hyper_util::client::legacy::Client;
-    use hyper_util::rt::TokioExecutor;
 
     // Build the full URI
     let uri = match ollama_config.build_uri(path) {
         Ok(uri) => uri,
         Err(e) => {
-            let err_msg = format!("Error parsing URI for path {}: {}", path, e);
+            let err_msg = format!("Error parsing URI for path {path}: {e}");
             ollama_config.logger.log(&err_msg).await;
             return Ok(Response::builder()
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
@@ -244,7 +243,7 @@ where
                     Ok(builder.body(full(bytes)).unwrap())
                 }
                 Err(e) => {
-                    let err_msg = format!("Error collecting Ollama response body: {}", e);
+                    let err_msg = format!("Error collecting Ollama response body: {e}");
                     ollama_config.logger.log(&err_msg).await;
                     Ok(Response::builder()
                         .status(StatusCode::INTERNAL_SERVER_ERROR)
@@ -254,11 +253,11 @@ where
             }
         }
         Err(e) => {
-            let err_msg = format!("Error forwarding request to Ollama: {}", e);
+            let err_msg = format!("Error forwarding request to Ollama: {e}");
             ollama_config.logger.log(&err_msg).await;
             Ok(Response::builder()
                 .status(StatusCode::BAD_GATEWAY)
-                .body(full(format!("Error forwarding request to Ollama: {}", e)))
+                .body(full(format!("Error forwarding request to Ollama: {e}")))
                 .unwrap())
         }
     }
@@ -267,20 +266,14 @@ where
 // Helper function to log incoming requests
 async fn log_request(logger: &Logger, method: &Method, path: &str) {
     let now = Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
-    logger.log(&format!("[{}] {} {}", now, method, path)).await;
+    logger.log(&format!("[{now}] {method} {path}")).await;
 }
 
 // Helper function to log responses
 async fn log_response(logger: &Logger, method: &Method, path: &str, status: &StatusCode) {
     let now = Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
     logger
-        .log(&format!(
-            "[{}] {} {} - {}",
-            now,
-            method,
-            path,
-            status.as_u16()
-        ))
+        .log(&format!("[{now}] {method} {path} - {}", status.as_u16()))
         .await;
 }
 
@@ -336,7 +329,7 @@ async fn handle_generate_with_model_info(
     let maybe_body_bytes = match body.collect().await {
         Ok(collected) => Some(collected.to_bytes()),
         Err(e) => {
-            let err_msg = format!("Error collecting request body for logging: {}", e);
+            let err_msg = format!("Error collecting request body for logging: {e}");
             ollama_config.logger.log(&err_msg).await;
             None
         }
@@ -346,19 +339,28 @@ async fn handle_generate_with_model_info(
     if let Some(ref body_bytes) = maybe_body_bytes {
         if let Ok(json) = serde_json::from_slice::<serde_json::Value>(body_bytes) {
             if let Some(model) = json.get("model").and_then(|m| m.as_str()) {
-                let is_unload_request = json.get("prompt").and_then(|p| p.as_str()).is_some_and(str::is_empty)
-                    && (json.get("options").and_then(|o| o.as_object()).and_then(|o| o.get("keep_alive"))
-                        .and_then(serde_json::Value::as_i64) == Some(0));
+                let is_unload_request = json
+                    .get("prompt")
+                    .and_then(|p| p.as_str())
+                    .is_some_and(str::is_empty)
+                    && (json
+                        .get("options")
+                        .and_then(|o| o.as_object())
+                        .and_then(|o| o.get("keep_alive"))
+                        .and_then(serde_json::Value::as_i64)
+                        == Some(0));
 
                 if is_unload_request {
                     ollama_config
                         .logger
-                        .log(&format!("Unloading model from memory: {}", model))
+                        .log(&format!("Unloading model from memory: {model}"))
                         .await;
                 } else {
                     ollama_config
                         .logger
-                        .log(&format!("Forwarding generate request to Ollama for model: {}", model))
+                        .log(&format!(
+                            "Forwarding generate request to Ollama for model: {model}"
+                        ))
                         .await;
                 }
             }
@@ -366,17 +368,21 @@ async fn handle_generate_with_model_info(
     }
 
     // Create a new request with the body we read for Ollama
-    let uri = ollama_config.build_uri("/api/generate")
+    let uri = ollama_config
+        .build_uri("/api/generate")
         .expect("Failed to build URI for generate endpoint");
 
     let req = Request::builder()
         .uri(uri)
         .method(Method::POST)
-        .body(Full::new(if let Some(bytes) = maybe_body_bytes {
-            bytes
-        } else {
-            Bytes::new()
-        }).boxed())
+        .body(
+            Full::new(if let Some(bytes) = maybe_body_bytes {
+                bytes
+            } else {
+                Bytes::new()
+            })
+            .boxed(),
+        )
         .expect("Failed to create request");
 
     // Forward the request directly to Ollama
@@ -421,7 +427,7 @@ async fn handle_tags_endpoint(ollama_config: &Arc<OllamaConfig>) -> Response<Box
                     {
                         "name": "llama2",
                         "modified_at": "2023-08-02T17:02:23Z",
-                        "size": 3791730298_u64,
+                        "size": 3_791_730_298_u64,
                         "digest": "sha256:a2...",
                         "details": {
                             "format": "gguf",
@@ -433,7 +439,7 @@ async fn handle_tags_endpoint(ollama_config: &Arc<OllamaConfig>) -> Response<Box
                     {
                         "name": "mistral",
                         "modified_at": "2023-11-20T12:15:30Z",
-                        "size": 4356823129_u64,
+                        "size": 4_356_823_129_u64,
                         "digest": "sha256:b1...",
                         "details": {
                             "format": "gguf",
@@ -446,7 +452,8 @@ async fn handle_tags_endpoint(ollama_config: &Arc<OllamaConfig>) -> Response<Box
             });
             json_response(&models, StatusCode::OK)
         },
-    ).await
+    )
+    .await
 }
 
 // Handle the documentation endpoint
@@ -502,7 +509,9 @@ async fn handle_authenticated_endpoint(
 
     ollama_config
         .logger
-        .log(&format!("Forwarding {operation_description} request to Ollama"))
+        .log(&format!(
+            "Forwarding {operation_description} request to Ollama"
+        ))
         .await;
 
     // Forward to Ollama server
@@ -527,13 +536,11 @@ async fn handle_ollama_endpoint_with_fallback<F>(
 where
     F: FnOnce() -> Response<BoxBody>,
 {
-    ollama_config
-        .logger
-        .log(log_message)
-        .await;
+    ollama_config.logger.log(log_message).await;
 
     // Create a request with no body
-    let uri = ollama_config.build_uri(path)
+    let uri = ollama_config
+        .build_uri(path)
         .expect("Failed to build URI for Ollama endpoint");
 
     let req = Request::builder()
@@ -682,7 +689,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create a TCP listener
     let listener = TcpListener::bind(addr).await?;
     logger
-        .log(&format!("REST API server listening on http://{}", addr))
+        .log(&format!("REST API server listening on http://{addr}"))
         .await;
     logger
         .log(&format!(
@@ -722,7 +729,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Accept connections in a loop
     loop {
         let (tcp_stream, addr) = listener.accept().await?;
-        logger.log(&format!("Connection from: {}", addr)).await;
+        logger.log(&format!("Connection from: {addr}")).await;
         let io = TokioIo::new(tcp_stream);
 
         // Clone the configuration for this connection
@@ -736,8 +743,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
 
             if let Err(err) = http1::Builder::new().serve_connection(io, service).await {
-                let err_msg = format!("Error serving connection: {:?}", err);
-                eprintln!("{}", err_msg);
+                let err_msg = format!("Error serving connection: {err:?}");
+                eprintln!("{err_msg}");
                 // Cannot use logger here as it requires await which is not allowed in this context
             }
         });
