@@ -1,3 +1,4 @@
+// filepath: /home/main/src/http_server/src/main.rs
 use bytes::Bytes;
 use chrono::Local;
 use clap::Parser;
@@ -7,12 +8,13 @@ use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs::{File, OpenOptions};
-use std::io::Write;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use tokio::fs::File;
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
+use tokio::sync::Mutex;
 
 // A simple type alias for convenience
 type BoxBody = http_body_util::combinators::BoxBody<Bytes, hyper::Error>;
@@ -24,14 +26,18 @@ struct Args {
     /// Port to listen on
     #[arg(short, long, default_value_t = 3001)]
     port: u16,
-    
+
     /// Ollama server URL
     #[arg(short, long, default_value = "http://localhost:11434")]
     ollama_url: String,
-    
+
     /// Output log file (if not specified, logs go to stdout only)
     #[arg(short, long)]
     log_file: Option<PathBuf>,
+
+    /// API key required for model management endpoints (create, copy, delete, pull, push)
+    #[arg(short, long)]
+    api_key: Option<String>,
 }
 
 // Logger that can write to both console and file
@@ -40,12 +46,13 @@ struct Logger {
 }
 
 impl Logger {
-    fn new(log_path: Option<PathBuf>) -> Self {
-        let log_file = log_path.and_then(|path| {
-            match OpenOptions::new()
+    async fn new(log_path: Option<PathBuf>) -> Self {
+        let log_file = if let Some(path) = log_path {
+            match tokio::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(path)
+                .await
             {
                 Ok(file) => Some(Mutex::new(file)),
                 Err(e) => {
@@ -53,22 +60,24 @@ impl Logger {
                     None
                 }
             }
-        });
-        
+        } else {
+            None
+        };
+
         Self { log_file }
     }
-    
-    fn log(&self, message: &str) {
+
+    async fn log(&self, message: &str) {
         // Always print to console
         println!("{}", message);
-        
+
         // Also log to file if configured
         if let Some(file_mutex) = &self.log_file {
-            if let Ok(mut file) = file_mutex.lock() {
-                // Ignore error if we can't write to the file
-                let _ = writeln!(file, "{}", message);
-                let _ = file.flush();
-            }
+            let message = format!("{}\n", message);
+            let mut file = file_mutex.lock().await;
+            // Ignore error if we can't write to the file
+            let _ = file.write_all(message.as_bytes()).await;
+            let _ = file.flush().await;
         }
     }
 }
@@ -166,11 +175,16 @@ async fn parse_body<T: for<'de> Deserialize<'de>>(body: hyper::body::Incoming) -
 struct OllamaConfig {
     base_url: String,
     logger: Arc<Logger>,
+    api_key: Option<String>,
 }
 
 impl OllamaConfig {
-    fn new(base_url: String, logger: Arc<Logger>) -> Self {
-        Self { base_url, logger }
+    fn new(base_url: String, logger: Arc<Logger>, api_key: Option<String>) -> Self {
+        Self {
+            base_url,
+            logger,
+            api_key,
+        }
     }
 }
 
@@ -193,7 +207,7 @@ async fn forward_to_ollama<T: Serialize, R: for<'de> Deserialize<'de>>(
         Ok(uri) => uri,
         Err(e) => {
             let err_msg = format!("Error parsing URI {}: {}", uri_str, e);
-            config.logger.log(&err_msg);
+            config.logger.log(&err_msg).await;
             return None;
         }
     };
@@ -216,14 +230,14 @@ async fn forward_to_ollama<T: Serialize, R: for<'de> Deserialize<'de>>(
                     Ok(request) => request,
                     Err(e) => {
                         let err_msg = format!("Error creating request with body: {}", e);
-                        config.logger.log(&err_msg);
+                        config.logger.log(&err_msg).await;
                         return None;
                     }
                 }
             }
             Err(e) => {
                 let err_msg = format!("Error serializing request body: {}", e);
-                config.logger.log(&err_msg);
+                config.logger.log(&err_msg).await;
                 return None;
             }
         }
@@ -236,7 +250,7 @@ async fn forward_to_ollama<T: Serialize, R: for<'de> Deserialize<'de>>(
             Ok(request) => request,
             Err(e) => {
                 let err_msg = format!("Error creating GET request: {}", e);
-                config.logger.log(&err_msg);
+                config.logger.log(&err_msg).await;
                 return None;
             }
         }
@@ -247,7 +261,7 @@ async fn forward_to_ollama<T: Serialize, R: for<'de> Deserialize<'de>>(
         Ok(res) => res,
         Err(e) => {
             let err_msg = format!("Error sending request to Ollama: {}", e);
-            config.logger.log(&err_msg);
+            config.logger.log(&err_msg).await;
             return None;
         }
     };
@@ -255,7 +269,7 @@ async fn forward_to_ollama<T: Serialize, R: for<'de> Deserialize<'de>>(
     // Check if successful
     if !res.status().is_success() {
         let err_msg = format!("Ollama API returned error status: {}", res.status());
-        config.logger.log(&err_msg);
+        config.logger.log(&err_msg).await;
         return None;
     }
 
@@ -267,14 +281,14 @@ async fn forward_to_ollama<T: Serialize, R: for<'de> Deserialize<'de>>(
                 Ok(parsed) => Some(parsed),
                 Err(e) => {
                     let err_msg = format!("Error parsing Ollama response: {}", e);
-                    config.logger.log(&err_msg);
+                    config.logger.log(&err_msg).await;
                     None
                 }
             }
         }
         Err(e) => {
             let err_msg = format!("Error collecting Ollama response body: {}", e);
-            config.logger.log(&err_msg);
+            config.logger.log(&err_msg).await;
             None
         }
     }
@@ -286,12 +300,31 @@ async fn handle_generate_endpoint(
     ollama_config: &Arc<OllamaConfig>,
 ) -> Response<BoxBody> {
     if let Some(generate_req) = parse_body::<GenerateRequest>(req.into_body()).await {
-        ollama_config.logger.log(
-            &format!(
-                "Forwarding generate request to Ollama for model: {}",
-                generate_req.model
-            )
-        );
+        // Check if this is a model unload request (empty prompt with keep_alive: 0)
+        let is_unload_request = generate_req.prompt.is_empty()
+            && generate_req.options.as_ref().map_or(false, |opts| {
+                opts.get("keep_alive")
+                    .map_or(false, |val| val.as_i64().map_or(false, |num| num == 0))
+            });
+
+        // Log appropriate message based on request type
+        if is_unload_request {
+            ollama_config
+                .logger
+                .log(&format!(
+                    "Unloading model from memory: {}",
+                    generate_req.model
+                ))
+                .await;
+        } else {
+            ollama_config
+                .logger
+                .log(&format!(
+                    "Forwarding generate request to Ollama for model: {}",
+                    generate_req.model
+                ))
+                .await;
+        }
 
         // Forward to Ollama server
         match forward_to_ollama::<GenerateRequest, GenerateResponse>(
@@ -304,7 +337,10 @@ async fn handle_generate_endpoint(
             Some(ollama_response) => json_response(&ollama_response, StatusCode::OK),
             None => {
                 // Fallback to mock response if Ollama is unavailable
-                ollama_config.logger.log("Failed to get response from Ollama, using mock response");
+                ollama_config
+                    .logger
+                    .log("Failed to get response from Ollama, using mock response")
+                    .await;
                 let response = GenerateResponse {
                     model: generate_req.model,
                     created_at: Local::now().to_rfc3339(),
@@ -327,14 +363,20 @@ async fn handle_generate_endpoint(
 
 // Handle the /api/tags endpoint
 async fn handle_tags_endpoint(ollama_config: &Arc<OllamaConfig>) -> Response<BoxBody> {
-    ollama_config.logger.log("Forwarding request to list models to Ollama");
+    ollama_config
+        .logger
+        .log("Forwarding request to list models to Ollama")
+        .await;
 
     // Forward to Ollama server
     match forward_to_ollama::<(), ModelsResponse>(ollama_config, "/api/tags", None).await {
         Some(ollama_response) => json_response(&ollama_response, StatusCode::OK),
         None => {
             // Fallback to mock response if Ollama is unavailable
-            ollama_config.logger.log("Failed to get response from Ollama, using mock response");
+            ollama_config
+                .logger
+                .log("Failed to get response from Ollama, using mock response")
+                .await;
             // Simulate a list of models
             let models = ModelsResponse {
                 models: vec![
@@ -381,7 +423,28 @@ fn handle_docs_endpoint() -> Response<BoxBody> {
             <ul>
                 <li><code>POST /api/generate</code> - Generate text from a model</li>
                 <li><code>GET /api/tags</code> - List available models</li>
+                <li><code>POST /api/create</code> - Create a new model (requires authentication)</li>
+                <li><code>POST /api/copy</code> - Copy a model (requires authentication)</li>
+                <li><code>DELETE /api/delete</code> - Delete a model (requires authentication)</li>
+                <li><code>POST /api/pull</code> - Pull a model (requires authentication)</li>
+                <li><code>POST /api/push</code> - Push a model (requires authentication)</li>
             </ul>
+            <h2>Special Operations:</h2>
+            <ul>
+                <li><strong>Unload a model:</strong> To unload a model from memory, send a request to <code>POST /api/generate</code> with an empty prompt and <code>keep_alive: 0</code> in the options. Example:
+                <pre>{
+  \"model\": \"MODEL_NAME\",
+  \"prompt\": \"\",
+  \"options\": {
+    \"keep_alive\": 0
+  }
+}</pre>
+                </li>
+            </ul>
+            <h2>Authentication:</h2>
+            <p>For model management endpoints (create, copy, delete, pull, push), an API key is required.
+            Pass the API key in the Authorization header as:<br/>
+            <code>Authorization: Bearer YOUR_API_KEY</code></p>
             </body></html>"
         ))
         .unwrap()
@@ -393,7 +456,14 @@ async fn proxy_to_ollama(
     path: &str,
     ollama_config: &Arc<OllamaConfig>,
 ) -> Result<Response<BoxBody>, hyper::Error> {
-    ollama_config.logger.log(&format!("Proxying request to Ollama: {} {}", req.method(), path));
+    ollama_config
+        .logger
+        .log(&format!(
+            "Proxying request to Ollama: {} {}",
+            req.method(),
+            path
+        ))
+        .await;
 
     // Try to read the body
     let (parts, body) = req.into_parts();
@@ -401,7 +471,7 @@ async fn proxy_to_ollama(
         Ok(collected) => Some(collected.to_bytes()),
         Err(e) => {
             let err_msg = format!("Error collecting request body: {}", e);
-            ollama_config.logger.log(&err_msg);
+            ollama_config.logger.log(&err_msg).await;
             None
         }
     };
@@ -416,7 +486,7 @@ async fn proxy_to_ollama(
         Ok(uri) => uri,
         Err(e) => {
             let err_msg = format!("Error parsing URI {}: {}", uri_str, e);
-            ollama_config.logger.log(&err_msg);
+            ollama_config.logger.log(&err_msg).await;
             return Ok(Response::builder()
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
                 .body(full("Invalid URI"))
@@ -446,21 +516,21 @@ async fn proxy_to_ollama(
         request_builder
             .body(Full::new(Bytes::new()).boxed())
             .unwrap()
-    };    // Send to Ollama
+    }; // Send to Ollama
     match client.request(forwarded_req).await {
         Ok(ollama_resp) => {
             // Build response
             let (parts, body) = ollama_resp.into_parts();
             let status = parts.status;
-            
+
             // Collect the body
             match body.collect().await {
                 Ok(collected) => {
                     let bytes = collected.to_bytes();
-                    
+
                     // Build our response
                     let mut builder = Response::builder().status(status);
-                    
+
                     // Copy headers
                     if let Some(headers) = builder.headers_mut() {
                         for (name, value) in parts.headers {
@@ -470,12 +540,12 @@ async fn proxy_to_ollama(
                             }
                         }
                     }
-                    
+
                     Ok(builder.body(full(bytes)).unwrap())
                 }
                 Err(e) => {
                     let err_msg = format!("Error collecting Ollama response body: {}", e);
-                    ollama_config.logger.log(&err_msg);
+                    ollama_config.logger.log(&err_msg).await;
                     Ok(Response::builder()
                         .status(StatusCode::INTERNAL_SERVER_ERROR)
                         .body(full("Error collecting response from Ollama"))
@@ -485,7 +555,7 @@ async fn proxy_to_ollama(
         }
         Err(e) => {
             let err_msg = format!("Error forwarding request to Ollama: {}", e);
-            ollama_config.logger.log(&err_msg);
+            ollama_config.logger.log(&err_msg).await;
             Ok(Response::builder()
                 .status(StatusCode::BAD_GATEWAY)
                 .body(full(format!("Error forwarding request to Ollama: {}", e)))
@@ -495,15 +565,23 @@ async fn proxy_to_ollama(
 }
 
 // Helper function to log incoming requests
-fn log_request(logger: &Logger, method: &Method, path: &str) {
+async fn log_request(logger: &Logger, method: &Method, path: &str) {
     let now = Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
-    logger.log(&format!("[{}] {} {}", now, method, path));
+    logger.log(&format!("[{}] {} {}", now, method, path)).await;
 }
 
 // Helper function to log responses
-fn log_response(logger: &Logger, method: &Method, path: &str, status: &StatusCode) {
+async fn log_response(logger: &Logger, method: &Method, path: &str, status: &StatusCode) {
     let now = Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
-    logger.log(&format!("[{}] {} {} - {}", now, method, path, status.as_u16()));
+    logger
+        .log(&format!(
+            "[{}] {} {} - {}",
+            now,
+            method,
+            path,
+            status.as_u16()
+        ))
+        .await;
 }
 
 // Handle 404 Not Found responses
@@ -515,6 +593,169 @@ fn handle_not_found() -> Response<BoxBody> {
         .unwrap()
 }
 
+// Check if request is authenticated - returns true if API key is not required or if it matches
+async fn is_authenticated(
+    req: &Request<hyper::body::Incoming>,
+    ollama_config: &Arc<OllamaConfig>,
+) -> bool {
+    // If no API key is configured, allow all requests
+    if ollama_config.api_key.is_none() {
+        return true;
+    }
+
+    // Check for Authorization header
+    if let Some(auth_header) = req.headers().get("Authorization") {
+        if let Ok(auth_str) = auth_header.to_str() {
+            // Format expected is "Bearer <api_key>"
+            if let Some(api_key) = auth_str.strip_prefix("Bearer ") {
+                return Some(api_key.to_string()) == ollama_config.api_key;
+            }
+        }
+    }
+
+    false
+}
+
+// Handle unauthorized responses
+fn handle_unauthorized() -> Response<BoxBody> {
+    Response::builder()
+        .status(StatusCode::UNAUTHORIZED)
+        .header("Content-Type", "application/json")
+        .header("WWW-Authenticate", "Bearer")
+        .body(full(r#"{"error":"Unauthorized - API key required"}"#))
+        .unwrap()
+}
+
+// Handle model creation endpoint
+async fn handle_create_model_endpoint(
+    req: Request<hyper::body::Incoming>,
+    ollama_config: &Arc<OllamaConfig>,
+) -> Response<BoxBody> {
+    // Check authentication
+    if !is_authenticated(&req, ollama_config).await {
+        return handle_unauthorized();
+    }
+
+    ollama_config
+        .logger
+        .log("Forwarding model create request to Ollama")
+        .await;
+
+    // Forward to Ollama server
+    proxy_to_ollama(req, "/api/create", ollama_config)
+        .await
+        .unwrap_or_else(|e| {
+            Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(full(format!("Error: {}", e)))
+                .unwrap()
+        })
+}
+
+// Handle model copy endpoint
+async fn handle_copy_model_endpoint(
+    req: Request<hyper::body::Incoming>,
+    ollama_config: &Arc<OllamaConfig>,
+) -> Response<BoxBody> {
+    // Check authentication
+    if !is_authenticated(&req, ollama_config).await {
+        return handle_unauthorized();
+    }
+
+    ollama_config
+        .logger
+        .log("Forwarding model copy request to Ollama")
+        .await;
+
+    // Forward to Ollama server
+    proxy_to_ollama(req, "/api/copy", ollama_config)
+        .await
+        .unwrap_or_else(|e| {
+            Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(full(format!("Error: {}", e)))
+                .unwrap()
+        })
+}
+
+// Handle model delete endpoint
+async fn handle_delete_model_endpoint(
+    req: Request<hyper::body::Incoming>,
+    ollama_config: &Arc<OllamaConfig>,
+) -> Response<BoxBody> {
+    // Check authentication
+    if !is_authenticated(&req, ollama_config).await {
+        return handle_unauthorized();
+    }
+
+    ollama_config
+        .logger
+        .log("Forwarding model delete request to Ollama")
+        .await;
+
+    // Forward to Ollama server
+    proxy_to_ollama(req, "/api/delete", ollama_config)
+        .await
+        .unwrap_or_else(|e| {
+            Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(full(format!("Error: {}", e)))
+                .unwrap()
+        })
+}
+
+// Handle model pull endpoint
+async fn handle_pull_model_endpoint(
+    req: Request<hyper::body::Incoming>,
+    ollama_config: &Arc<OllamaConfig>,
+) -> Response<BoxBody> {
+    // Check authentication
+    if !is_authenticated(&req, ollama_config).await {
+        return handle_unauthorized();
+    }
+
+    ollama_config
+        .logger
+        .log("Forwarding model pull request to Ollama")
+        .await;
+
+    // Forward to Ollama server
+    proxy_to_ollama(req, "/api/pull", ollama_config)
+        .await
+        .unwrap_or_else(|e| {
+            Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(full(format!("Error: {}", e)))
+                .unwrap()
+        })
+}
+
+// Handle model push endpoint
+async fn handle_push_model_endpoint(
+    req: Request<hyper::body::Incoming>,
+    ollama_config: &Arc<OllamaConfig>,
+) -> Response<BoxBody> {
+    // Check authentication
+    if !is_authenticated(&req, ollama_config).await {
+        return handle_unauthorized();
+    }
+
+    ollama_config
+        .logger
+        .log("Forwarding model push request to Ollama")
+        .await;
+
+    // Forward to Ollama server
+    proxy_to_ollama(req, "/api/push", ollama_config)
+        .await
+        .unwrap_or_else(|e| {
+            Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(full(format!("Error: {}", e)))
+                .unwrap()
+        })
+}
+
 // Our service handler function
 async fn handle_request(
     req: Request<hyper::body::Incoming>,
@@ -524,7 +765,7 @@ async fn handle_request(
     let uri_path = req.uri().path().to_string();
 
     // Log the incoming request
-    log_request(&ollama_config.logger, &method, &uri_path);
+    log_request(&ollama_config.logger, &method, &uri_path).await;
 
     let response = match (method.clone(), uri_path.as_str()) {
         // API Endpoints
@@ -534,6 +775,13 @@ async fn handle_request(
 
         // List models endpoint - Forward to Ollama
         (Method::GET, "/api/tags") => handle_tags_endpoint(&ollama_config).await,
+
+        // Model management endpoints with authentication
+        (Method::POST, "/api/create") => handle_create_model_endpoint(req, &ollama_config).await,
+        (Method::POST, "/api/copy") => handle_copy_model_endpoint(req, &ollama_config).await,
+        (Method::DELETE, "/api/delete") => handle_delete_model_endpoint(req, &ollama_config).await,
+        (Method::POST, "/api/pull") => handle_pull_model_endpoint(req, &ollama_config).await,
+        (Method::POST, "/api/push") => handle_push_model_endpoint(req, &ollama_config).await,
 
         // API documentation
         (Method::GET, "/") => handle_docs_endpoint(),
@@ -548,7 +796,13 @@ async fn handle_request(
     };
 
     // Log the response status
-    log_response(&ollama_config.logger, &method, &uri_path, &response.status());
+    log_response(
+        &ollama_config.logger,
+        &method,
+        &uri_path,
+        &response.status(),
+    )
+    .await;
 
     Ok(response)
 }
@@ -557,27 +811,70 @@ async fn handle_request(
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse command-line arguments
     let args = Args::parse();
-    
+
     // Set up the server address
     let addr = SocketAddr::from(([127, 0, 0, 1], args.port));
-    
+
     // Create logger
-    let logger = Arc::new(Logger::new(args.log_file.clone()));
-    
+    let logger = Arc::new(Logger::new(args.log_file.clone()).await);
+
     // Create Ollama configuration
-    let ollama_config = OllamaConfig::new(args.ollama_url.clone(), logger.clone());
-    logger.log(&format!(
-        "Forwarding requests to Ollama server at: {}",
-        ollama_config.base_url
-    ));
+    let ollama_config = OllamaConfig::new(
+        args.ollama_url.clone(),
+        logger.clone(),
+        args.api_key.clone(),
+    );
+    logger
+        .log(&format!(
+            "Forwarding requests to Ollama server at: {}",
+            ollama_config.base_url
+        ))
+        .await;
+
+    if let Some(_) = &args.api_key {
+        logger
+            .log("API authentication enabled for model management endpoints")
+            .await;
+    } else {
+        logger.log("WARNING: API authentication not configured. All endpoints are publicly accessible!").await;
+    }
 
     // Create a TCP listener
     let listener = TcpListener::bind(addr).await?;
-    logger.log(&format!("REST API server listening on http://{}", addr));
-    logger.log(&format!("Documentation available at http://127.0.0.1:{}/", args.port));
-    logger.log("API endpoints:");
-    logger.log("  POST /api/generate - Generate text from a model");
-    logger.log("  GET  /api/tags     - List available models");
+    logger
+        .log(&format!("REST API server listening on http://{}", addr))
+        .await;
+    logger
+        .log(&format!(
+            "Documentation available at http://127.0.0.1:{}/",
+            args.port
+        ))
+        .await;
+    logger.log("API endpoints:").await;
+    logger
+        .log("  POST /api/generate - Generate text from a model")
+        .await;
+    logger
+        .log("  GET  /api/tags     - List available models")
+        .await;
+    logger
+        .log("  POST /api/create   - Create a new model (auth required)")
+        .await;
+    logger
+        .log("  POST /api/copy     - Copy a model (auth required)")
+        .await;
+    logger
+        .log("  DELETE /api/delete - Delete a model (auth required)")
+        .await;
+    logger
+        .log("  POST /api/pull     - Pull a model (auth required)")
+        .await;
+    logger
+        .log("  POST /api/push     - Push a model (auth required)")
+        .await;
+    logger
+        .log("  Note: To unload a model, use /api/generate with empty prompt and keep_alive: 0")
+        .await;
 
     // Shared configuration for all connections
     let ollama_config = std::sync::Arc::new(ollama_config);
@@ -585,7 +882,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Accept connections in a loop
     loop {
         let (tcp_stream, addr) = listener.accept().await?;
-        logger.log(&format!("Connection from: {}", addr));
+        logger.log(&format!("Connection from: {}", addr)).await;
         let io = TokioIo::new(tcp_stream);
 
         // Clone the configuration for this connection
@@ -599,7 +896,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
 
             if let Err(err) = http1::Builder::new().serve_connection(io, service).await {
-                eprintln!("Error serving connection: {:?}", err);
+                let err_msg = format!("Error serving connection: {:?}", err);
+                eprintln!("{}", err_msg);
+                // Cannot use logger here as it requires await which is not allowed in this context
             }
         });
     }
