@@ -6,7 +6,7 @@ use http_body_util::{BodyExt, Full};
 use hyper::server::conn::http1;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -118,6 +118,12 @@ impl OllamaConfig {
             api_key,
         }
     }
+
+    // Build a full URI for an Ollama API endpoint
+    fn build_uri(&self, path: &str) -> Result<hyper::Uri, hyper::http::uri::InvalidUri> {
+        let uri_str = format!("{}{}", self.base_url, path);
+        uri_str.parse::<hyper::Uri>()
+    }
 }
 
 // Proxy an API request to Ollama
@@ -156,11 +162,10 @@ where
     use hyper_util::rt::TokioExecutor;
 
     // Build the full URI
-    let uri_str = format!("{}{}", ollama_config.base_url, path);
-    let uri = match uri_str.parse::<hyper::Uri>() {
+    let uri = match ollama_config.build_uri(path) {
         Ok(uri) => uri,
         Err(e) => {
-            let err_msg = format!("Error parsing URI {}: {}", uri_str, e);
+            let err_msg = format!("Error parsing URI for path {}: {}", path, e);
             ollama_config.logger.log(&err_msg).await;
             return Ok(Response::builder()
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
@@ -341,8 +346,11 @@ async fn handle_generate_with_model_info(
     }
 
     // Create a new request with the body we read for Ollama
+    let uri = ollama_config.build_uri("/api/generate")
+        .expect("Failed to build URI for generate endpoint");
+
     let req = Request::builder()
-        .uri(format!("{}/api/generate", ollama_config.base_url))
+        .uri(uri)
         .method(Method::POST)
         .body(Full::new(if let Some(bytes) = maybe_body_bytes {
             bytes
@@ -505,9 +513,12 @@ where
         .await;
 
     // Create a request with no body
+    let uri = ollama_config.build_uri(path)
+        .expect("Failed to build URI for Ollama endpoint");
+
     let req = Request::builder()
         .method(method)
-        .uri(format!("{}{}", ollama_config.base_url, path))
+        .uri(uri)
         .body(Full::new(Bytes::new()).boxed())
         .expect("Failed to create request");
 
@@ -640,7 +651,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ))
         .await;
 
-    if let Some(_) = &args.api_key {
+    if args.api_key.is_some() {
         logger
             .log("API authentication enabled for model management endpoints")
             .await;
