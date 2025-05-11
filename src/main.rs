@@ -8,16 +8,18 @@ use hyper::server::conn::http1;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioIo};
+use rustls::ServerConfig;
+use rustls_pemfile::{certs, pkcs8_private_keys};
 use serde::Serialize;
+use std::fs::File;
+use std::io::BufReader;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
+use tokio_rustls::TlsAcceptor;
 use tokio::sync::mpsc::{self, Sender};
-
-// OpenAI API compatibility module
-mod openai;
 
 // A simple type alias for convenience
 type BoxBody = http_body_util::combinators::BoxBody<Bytes, hyper::Error>;
@@ -46,6 +48,22 @@ struct Args {
     /// Example: --allowed-ips "127.0.0.1,192.168.1.5"
     #[arg(long)]
     allowed_ips: Option<String>,
+
+    /// Enable HTTPS mode. If not set, server will use HTTP
+    #[arg(long)]
+    https: bool,
+
+    /// TLS certificate file path (required when HTTPS is enabled)
+    #[arg(long)]
+    cert_file: Option<PathBuf>,
+
+    /// TLS private key file path (required when HTTPS is enabled)
+    #[arg(long)]
+    key_file: Option<PathBuf>,
+
+    /// Listen on all network interfaces instead of just localhost
+    #[arg(long)]
+    listen_public: bool,
 }
 
 // Logger that can write to both console and file
@@ -409,7 +427,7 @@ fn is_unload_model_request(json: &serde_json::Value) -> bool {
     // 2. An empty prompt field
     // combined with keep_alive: 0 indicates an unload request
     let prompt_is_empty = match json.get("prompt") {
-        Some(prompt) => prompt.as_str().map_or(false, |s| s.is_empty()),
+        Some(prompt) => prompt.as_str().is_some_and(|s| s.is_empty()),
         None => true, // No prompt field is valid for unload request
     };
 
@@ -602,6 +620,14 @@ fn handle_docs_endpoint() -> Response<BoxBody> {
             <p>The server can be configured with an IP address allowlist to restrict access to specific IP addresses.
             This is configured via the command-line argument <code>--allowed-ips</code> when starting the server.
             If this allowlist is enabled, requests from IP addresses not in the list will be rejected with a 403 Forbidden response.</p>
+            <h2>HTTPS Support:</h2>
+            <p>The server can be started in HTTPS mode to support encrypted connections. Use the following command-line options:</p>
+            <ul>
+                <li><code>--https</code> - Enable HTTPS mode</li>
+                <li><code>--cert-file PATH</code> - Path to the SSL certificate file</li>
+                <li><code>--key-file PATH</code> - Path to the SSL private key file</li>
+                <li><code>--listen-public</code> - Listen on all network interfaces (default is localhost only)</li>
+            </ul>
             </body></html>"
         ))
         .unwrap()
@@ -814,7 +840,7 @@ fn get_client_ip(req: &Request<hyper::body::Incoming>, socket_addr: &SocketAddr)
             }
         }
     }
-    
+
     // Default to the socket address if header parsing fails
     *socket_addr
 }
@@ -827,7 +853,7 @@ async fn handle_request(
 ) -> Result<Response<BoxBody>, hyper::Error> {
     let method = req.method().clone();
     let uri_path = req.uri().path().to_string();
-    
+
     // Get the effective client IP (considering X-Forwarded-For header)
     let client_ip = get_client_ip(&req, &socket_addr);
 
@@ -883,17 +909,50 @@ async fn handle_request(
     Ok(response)
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Parse command-line arguments
-    let args = Args::parse();
+// Function to load TLS certificates
+fn load_tls_config(cert_path: &PathBuf, key_path: &PathBuf) -> Result<ServerConfig, Box<dyn std::error::Error>> {
+    // Load certificate
+    let cert_file = File::open(cert_path)?;
+    let mut cert_reader = BufReader::new(cert_file);
+    let mut cert_chain = Vec::new();
+    
+    for cert_result in certs(&mut cert_reader) {
+        let cert = cert_result?;
+        cert_chain.push(cert);
+    }
 
-    // Set up the server address
-    let addr = SocketAddr::from(([127, 0, 0, 1], args.port));
+    if cert_chain.is_empty() {
+        return Err("No certificates found in certificate file".into());
+    }
 
-    // Create logger
-    let logger = Arc::new(Logger::new(args.log_file.clone()).await);
+    // Load private key
+    let key_file = File::open(key_path)?;
+    let mut key_reader = BufReader::new(key_file);
+    let mut private_keys = Vec::new();
+    
+    for key_result in pkcs8_private_keys(&mut key_reader) {
+        let key = key_result?;
+        private_keys.push(key);
+    }
 
+    if private_keys.is_empty() {
+        return Err("No private keys found in key file".into());
+    }
+
+    // Create TLS configuration with the first private key
+    let config = ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(cert_chain, private_keys.remove(0).into())?;
+
+    Ok(config)
+}
+
+// Run HTTP server implementation
+async fn run_http_server(
+    addr: SocketAddr,
+    args: Args,
+    logger: Arc<Logger>,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Create Ollama configuration
     let ollama_config = OllamaConfig::new(
         args.ollama_url.clone(),
@@ -901,6 +960,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.api_key.clone(),
         args.allowed_ips.clone(),
     );
+
     logger
         .log(&format!(
             "Forwarding requests to Ollama server at: {}",
@@ -955,31 +1015,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             args.port
         ))
         .await;
-    logger.log("API endpoints:").await;
-    logger
-        .log("  POST /api/generate - Generate text from a model")
-        .await;
-    logger
-        .log("  GET  /api/tags     - List available models")
-        .await;
-    logger
-        .log("  POST /api/create   - Create a new model (auth required)")
-        .await;
-    logger
-        .log("  POST /api/copy     - Copy a model (auth required)")
-        .await;
-    logger
-        .log("  DELETE /api/delete - Delete a model (auth required)")
-        .await;
-    logger
-        .log("  POST /api/pull     - Pull a model (auth required)")
-        .await;
-    logger
-        .log("  POST /api/push     - Push a model (auth required)")
-        .await;
-    logger
-        .log("  Note: To unload a model, use /api/generate with empty prompt and keep_alive: 0")
-        .await;
+
+    log_api_endpoints(&logger).await;
 
     // Shared configuration for all connections
     let ollama_config = std::sync::Arc::new(ollama_config);
@@ -1010,4 +1047,217 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
     }
+}
+
+// Run HTTPS server implementation
+async fn run_https_server(
+    addr: SocketAddr,
+    tls_config: ServerConfig,
+    args: Args,
+    logger: Arc<Logger>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Create Ollama configuration
+    let ollama_config = OllamaConfig::new(
+        args.ollama_url.clone(),
+        logger.clone(),
+        args.api_key.clone(),
+        args.allowed_ips.clone(),
+    );
+
+    logger
+        .log(&format!(
+            "Forwarding requests to Ollama server at: {}",
+            ollama_config.base_url
+        ))
+        .await;
+
+    if args.api_key.is_some() {
+        logger
+            .log("API authentication enabled for model management endpoints")
+            .await;
+    } else {
+        logger.log("WARNING: API authentication not configured. All endpoints are publicly accessible!").await;
+    }
+
+    if let Some(ref allowed_ips) = ollama_config.allowed_ips {
+        if !allowed_ips.is_empty() {
+            logger
+                .log(&format!(
+                    "IP address allowlist enabled. Only {} IP addresses are allowed to connect.",
+                    allowed_ips.len()
+                ))
+                .await;
+            // Log the list of allowed IPs if it's not too large
+            if allowed_ips.len() <= 10 {
+                logger
+                    .log(&format!(
+                        "Allowed IPs: {}",
+                        allowed_ips
+                            .iter()
+                            .map(|ip| ip.to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ))
+                    .await;
+            }
+        } else {
+            logger
+                .log("WARNING: IP allowlist is empty. All requests will be blocked!")
+                .await;
+        }
+    }
+
+    // Create a TCP listener
+    let listener = TcpListener::bind(addr).await?;
+    logger
+        .log(&format!("REST API server listening on https://{addr}"))
+        .await;
+    logger
+        .log(&format!(
+            "Documentation available at https://127.0.0.1:{}/",
+            args.port
+        ))
+        .await;
+
+    log_api_endpoints(&logger).await;
+
+    // Create TLS acceptor
+    let tls_acceptor = TlsAcceptor::from(Arc::new(tls_config));
+
+    // Shared configuration for all connections
+    let ollama_config = std::sync::Arc::new(ollama_config);
+
+    // Accept connections in a loop
+    loop {
+        let (tcp_stream, addr) = listener.accept().await?;
+        logger.log(&format!("Connection from: {addr}")).await;
+
+        // Accept the TLS connection
+        let tls_acceptor = tls_acceptor.clone();
+        let ollama_config = ollama_config.clone();
+        let logger = logger.clone();
+
+        // Spawn a new task for each connection
+        tokio::task::spawn(async move {
+            match tls_acceptor.accept(tcp_stream).await {
+                Ok(tls_stream) => {
+                    // Convert to TokioIo
+                    let io = TokioIo::new(tls_stream);
+
+                    // Save the client IP for this connection
+                    let client_ip = addr;
+
+                    let service = hyper::service::service_fn(move |req| {
+                        let config = ollama_config.clone();
+                        let client_addr = client_ip;
+                        async move { handle_request(req, config, client_addr).await }
+                    });
+
+                    if let Err(err) = http1::Builder::new().serve_connection(io, service).await {
+                        let err_msg = format!("Error serving TLS connection: {err:?}");
+                        eprintln!("{err_msg}");
+                        // Cannot use logger here as it requires await which is not allowed in this context
+                    }
+                }
+                Err(e) => {
+                    // Log TLS handshake errors
+                    if let Ok(err_msg) = tokio::task::spawn_blocking(move || {
+                        format!("TLS handshake error: {e}")
+                    }).await {
+                        logger.log(&err_msg).await;
+                    }
+                }
+            }
+        });
+    }
+}
+
+// Helper function to log API endpoints
+async fn log_api_endpoints(logger: &Logger) {
+    logger.log("API endpoints:").await;
+    logger
+        .log("  POST /api/generate - Generate text from a model")
+        .await;
+    logger
+        .log("  GET  /api/tags     - List available models")
+        .await;
+    logger
+        .log("  POST /api/create   - Create a new model (auth required)")
+        .await;
+    logger
+        .log("  POST /api/copy     - Copy a model (auth required)")
+        .await;
+    logger
+        .log("  DELETE /api/delete - Delete a model (auth required)")
+        .await;
+    logger
+        .log("  POST /api/pull     - Pull a model (auth required)")
+        .await;
+    logger
+        .log("  POST /api/push     - Push a model (auth required)")
+        .await;
+    logger
+        .log("  Note: To unload a model, use /api/generate with empty prompt and keep_alive: 0")
+        .await;
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Parse command-line arguments
+    let args = Args::parse();
+
+    // Determine the IP to bind to
+    let ip = if args.listen_public {
+        [0, 0, 0, 0] // Listen on all interfaces
+    } else {
+        [127, 0, 0, 1] // Listen only on localhost
+    };
+
+    // Set up the server address
+    let addr = SocketAddr::from((ip, args.port));
+
+    // Create logger
+    let logger = Arc::new(Logger::new(args.log_file.clone()).await);
+
+    // Check HTTPS configuration
+    if args.https {
+        // Validate certificate and key files
+        if args.cert_file.is_none() || args.key_file.is_none() {
+            eprintln!("Error: HTTPS mode requires both --cert-file and --key-file parameters");
+            eprintln!("\nExample usage:");
+            eprintln!("  cargo run -- --https --cert-file path/to/cert.pem --key-file path/to/key.pem");
+            eprintln!("\nYou can generate a self-signed certificate for testing using the provided script:");
+            eprintln!("  ./generate_cert.sh");
+            return Err("HTTPS mode requires both --cert-file and --key-file parameters".into());
+        }
+
+        let cert_file = args.cert_file.as_ref().unwrap();
+        let key_file = args.key_file.as_ref().unwrap();
+
+        // Load TLS configuration
+        let tls_config = match load_tls_config(cert_file, key_file) {
+            Ok(config) => config,
+            Err(e) => {
+                eprintln!("Error loading TLS configuration: {e}");
+                return Err(format!("Failed to load TLS configuration: {e}").into());
+            }
+        };
+
+        logger.log("HTTPS mode enabled").await;
+        logger.log(&format!("Using certificate file: {}", cert_file.display())).await;
+        logger.log(&format!("Using private key file: {}", key_file.display())).await;
+
+        // Run the server in HTTPS mode
+        run_https_server(addr, tls_config, args, logger).await?;
+    } else {
+        // Run the server in HTTP mode
+        logger.log("HTTP mode enabled (no encryption)").await;
+        if args.listen_public {
+            logger.log("WARNING: Server is listening on all network interfaces without encryption").await;
+        }
+
+        run_http_server(addr, args, logger).await?;
+    }
+
+    Ok(())
 }
