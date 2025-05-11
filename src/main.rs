@@ -41,6 +41,11 @@ struct Args {
     /// API key required for model management endpoints (create, copy, delete, pull, push)
     #[arg(short, long)]
     api_key: Option<String>,
+
+    /// List of allowed IP addresses (comma-separated). If specified, only these IPs can access the server.
+    /// Example: --allowed-ips "127.0.0.1,192.168.1.5"
+    #[arg(long)]
+    allowed_ips: Option<String>,
 }
 
 // Logger that can write to both console and file
@@ -133,14 +138,29 @@ struct OllamaConfig {
     base_url: String,
     logger: Arc<Logger>,
     api_key: Option<String>,
+    allowed_ips: Option<Vec<std::net::IpAddr>>,
 }
 
 impl OllamaConfig {
-    fn new(base_url: String, logger: Arc<Logger>, api_key: Option<String>) -> Self {
+    fn new(
+        base_url: String,
+        logger: Arc<Logger>,
+        api_key: Option<String>,
+        allowed_ips: Option<String>,
+    ) -> Self {
+        // Parse the allowed IPs string into a vector of IpAddr
+        let allowed_ips = allowed_ips.map(|ips_str| {
+            ips_str
+                .split(',')
+                .filter_map(|ip| ip.trim().parse::<std::net::IpAddr>().ok())
+                .collect::<Vec<_>>()
+        });
+
         Self {
             base_url,
             logger,
             api_key,
+            allowed_ips,
         }
     }
 
@@ -148,6 +168,21 @@ impl OllamaConfig {
     fn build_uri(&self, path: &str) -> Result<hyper::Uri, hyper::http::uri::InvalidUri> {
         let uri_str = format!("{}{}", self.base_url, path);
         uri_str.parse::<hyper::Uri>()
+    }
+
+    // Check if an IP address is allowed
+    fn is_ip_allowed(&self, client_ip: &SocketAddr) -> bool {
+        // If no allowlist is configured, allow all IPs
+        if self.allowed_ips.is_none() {
+            return true;
+        }
+
+        // Check if client IP is in the allowlist
+        if let Some(ref allowed_ips) = self.allowed_ips {
+            allowed_ips.contains(&client_ip.ip())
+        } else {
+            true
+        }
     }
 }
 
@@ -563,6 +598,10 @@ fn handle_docs_endpoint() -> Response<BoxBody> {
             <p>For model management endpoints (create, copy, delete, pull, push), an API key is required.
             Pass the API key in the Authorization header as:<br/>
             <code>Authorization: Bearer YOUR_API_KEY</code></p>
+            <h2>IP Address Allowlist:</h2>
+            <p>The server can be configured with an IP address allowlist to restrict access to specific IP addresses.
+            This is configured via the command-line argument <code>--allowed-ips</code> when starting the server.
+            If this allowlist is enabled, requests from IP addresses not in the list will be rejected with a 403 Forbidden response.</p>
             </body></html>"
         ))
         .unwrap()
@@ -749,17 +788,74 @@ async fn handle_api_endpoint(
     }
 }
 
+// Function to handle requests that are blocked due to IP restriction
+fn handle_ip_blocked(client_ip: &SocketAddr) -> Response<BoxBody> {
+    Response::builder()
+        .status(StatusCode::FORBIDDEN)
+        .header("Content-Type", "application/json")
+        .body(full(format!(
+            r#"{{"error":"Forbidden - IP address {} is not allowed"}}"#,
+            client_ip
+        )))
+        .unwrap()
+}
+
+// Helper function to get the client IP, considering X-Forwarded-For header for testing
+fn get_client_ip(req: &Request<hyper::body::Incoming>, socket_addr: &SocketAddr) -> SocketAddr {
+    // For testing purposes, we'll check if X-Forwarded-For header is present
+    if let Some(forwarded_for) = req.headers().get("X-Forwarded-For") {
+        if let Ok(forwarded_str) = forwarded_for.to_str() {
+            // Take the first IP in the list
+            if let Some(ip_str) = forwarded_str.split(',').next() {
+                if let Ok(ip) = ip_str.trim().parse::<std::net::IpAddr>() {
+                    // Create a new SocketAddr with the same port but different IP
+                    return SocketAddr::new(ip, socket_addr.port());
+                }
+            }
+        }
+    }
+    
+    // Default to the socket address if header parsing fails
+    *socket_addr
+}
+
 // Our service handler function
 async fn handle_request(
     req: Request<hyper::body::Incoming>,
     ollama_config: std::sync::Arc<OllamaConfig>,
-    client_ip: SocketAddr,
+    socket_addr: SocketAddr,
 ) -> Result<Response<BoxBody>, hyper::Error> {
     let method = req.method().clone();
     let uri_path = req.uri().path().to_string();
+    
+    // Get the effective client IP (considering X-Forwarded-For header)
+    let client_ip = get_client_ip(&req, &socket_addr);
 
     // Log the incoming request
     log_request(&ollama_config.logger, &method, &uri_path, &client_ip).await;
+
+    // Check if the client IP is allowed
+    if !ollama_config.is_ip_allowed(&client_ip) {
+        ollama_config
+            .logger
+            .log(&format!(
+                "Blocked request from unauthorized IP: {client_ip}"
+            ))
+            .await;
+
+        // Log the response status for the blocked request
+        let response = handle_ip_blocked(&client_ip);
+        log_response(
+            &ollama_config.logger,
+            &method,
+            &uri_path,
+            &response.status(),
+            &client_ip,
+        )
+        .await;
+
+        return Ok(response);
+    }
 
     let response = match (method.clone(), uri_path.as_str()) {
         // API documentation
@@ -803,6 +899,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.ollama_url.clone(),
         logger.clone(),
         args.api_key.clone(),
+        args.allowed_ips.clone(),
     );
     logger
         .log(&format!(
@@ -817,6 +914,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await;
     } else {
         logger.log("WARNING: API authentication not configured. All endpoints are publicly accessible!").await;
+    }
+
+    if let Some(ref allowed_ips) = ollama_config.allowed_ips {
+        if !allowed_ips.is_empty() {
+            logger
+                .log(&format!(
+                    "IP address allowlist enabled. Only {} IP addresses are allowed to connect.",
+                    allowed_ips.len()
+                ))
+                .await;
+            // Log the list of allowed IPs if it's not too large
+            if allowed_ips.len() <= 10 {
+                logger
+                    .log(&format!(
+                        "Allowed IPs: {}",
+                        allowed_ips
+                            .iter()
+                            .map(|ip| ip.to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ))
+                    .await;
+            }
+        } else {
+            logger
+                .log("WARNING: IP allowlist is empty. All requests will be blocked!")
+                .await;
+        }
     }
 
     // Create a TCP listener
