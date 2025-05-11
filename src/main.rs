@@ -548,15 +548,16 @@ async fn handle_api_endpoint(
                     });
                     json_response(&models, StatusCode::OK)
                 },
-            ).await
+            )
+            .await
         }
 
         // Model management endpoints with authentication
-        (Method::POST, ["api", "create"]) |
-        (Method::POST, ["api", "copy"]) |
-        (Method::POST, ["api", "pull"]) |
-        (Method::POST, ["api", "push"]) |
-        (Method::DELETE, ["api", "delete"]) => {
+        (Method::POST, ["api", "create"])
+        | (Method::POST, ["api", "copy"])
+        | (Method::POST, ["api", "pull"])
+        | (Method::POST, ["api", "push"])
+        | (Method::DELETE, ["api", "delete"]) => {
             // Get the operation name (create, copy, delete, etc.)
             let operation = path_parts[1];
 
