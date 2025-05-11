@@ -151,6 +151,33 @@ impl OllamaConfig {
     }
 }
 
+// Helper function to create an error response
+fn create_error_response(status: StatusCode, message: String) -> Response<BoxBody> {
+    Response::builder()
+        .status(status)
+        .body(full(message))
+        .unwrap()
+}
+
+// Build the URI for an Ollama request
+async fn build_ollama_uri(
+    path: &str,
+    ollama_config: &Arc<OllamaConfig>,
+) -> Result<hyper::Uri, hyper::http::uri::InvalidUri> {
+    let uri = ollama_config.build_uri(path)?;
+    Ok(uri)
+}
+
+// Copy headers from source to target
+fn copy_headers(
+    source: &hyper::HeaderMap<hyper::header::HeaderValue>,
+    target: &mut hyper::HeaderMap<hyper::header::HeaderValue>,
+) {
+    for (name, value) in source {
+        target.insert(name.clone(), value.clone());
+    }
+}
+
 // Proxy an API request to Ollama
 async fn proxy_to_ollama<B>(
     req: Request<B>,
@@ -182,18 +209,16 @@ where
         }
     };
 
-    // Build a client
-
     // Build the full URI
-    let uri = match ollama_config.build_uri(path) {
+    let uri = match build_ollama_uri(path, ollama_config).await {
         Ok(uri) => uri,
         Err(e) => {
             let err_msg = format!("Error parsing URI for path {path}: {e}");
             ollama_config.logger.log(&err_msg).await;
-            return Ok(Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(full("Invalid URI"))
-                .unwrap());
+            return Ok(create_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Invalid URI".to_string(),
+            ));
         }
     };
 
@@ -203,13 +228,9 @@ where
     // Build request to forward
     let mut request_builder = Request::builder().uri(uri).method(parts.method);
 
-    // Copy headers - use direct access to headers
+    // Copy headers
     if let Some(headers) = request_builder.headers_mut() {
-        for (name, value) in parts.headers {
-            if let Some(header_name) = name {
-                headers.insert(header_name, value);
-            }
-        }
+        copy_headers(&parts.headers, headers);
     }
 
     // Add body if it exists
@@ -219,7 +240,9 @@ where
         request_builder
             .body(Full::new(Bytes::new()).boxed())
             .unwrap()
-    }; // Send to Ollama
+    };
+
+    // Send to Ollama
     match client.request(forwarded_req).await {
         Ok(ollama_resp) => {
             // Build response
@@ -236,12 +259,7 @@ where
 
                     // Copy headers
                     if let Some(headers) = builder.headers_mut() {
-                        for (name, value) in parts.headers {
-                            // Only insert if name is valid
-                            if let Some(header_name) = name {
-                                headers.insert(header_name, value);
-                            }
-                        }
+                        copy_headers(&parts.headers, headers);
                     }
 
                     Ok(builder.body(full(bytes)).unwrap())
@@ -249,20 +267,20 @@ where
                 Err(e) => {
                     let err_msg = format!("Error collecting Ollama response body: {e}");
                     ollama_config.logger.log(&err_msg).await;
-                    Ok(Response::builder()
-                        .status(StatusCode::INTERNAL_SERVER_ERROR)
-                        .body(full("Error collecting response from Ollama"))
-                        .unwrap())
+                    Ok(create_error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Error collecting response from Ollama".to_string(),
+                    ))
                 }
             }
         }
         Err(e) => {
             let err_msg = format!("Error forwarding request to Ollama: {e}");
             ollama_config.logger.log(&err_msg).await;
-            Ok(Response::builder()
-                .status(StatusCode::BAD_GATEWAY)
-                .body(full(format!("Error forwarding request to Ollama: {e}")))
-                .unwrap())
+            Ok(create_error_response(
+                StatusCode::BAD_GATEWAY,
+                format!("Error forwarding request to Ollama: {e}"),
+            ))
         }
     }
 }
@@ -323,6 +341,52 @@ fn handle_unauthorized() -> Response<BoxBody> {
         .unwrap()
 }
 
+// Helper to check if a request is an unload model request
+fn is_unload_model_request(json: &serde_json::Value) -> bool {
+    json.get("prompt")
+        .and_then(|p| p.as_str())
+        .is_some_and(str::is_empty)
+        && (json
+            .get("options")
+            .and_then(|o| o.as_object())
+            .and_then(|o| o.get("keep_alive"))
+            .and_then(serde_json::Value::as_i64)
+            == Some(0))
+}
+
+// Extract and log model information from generate request
+async fn log_model_info(
+    json: &serde_json::Value,
+    logger: &Logger,
+) {
+    if let Some(model) = json.get("model").and_then(|m| m.as_str()) {
+        let is_unload_request = is_unload_model_request(json);
+
+        if is_unload_request {
+            logger
+                .log(&format!("Unloading model from memory: {model}"))
+                .await;
+        } else {
+            logger
+                .log(&format!(
+                    "Forwarding generate request to Ollama for model: {model}"
+                ))
+                .await;
+        }
+    }
+}
+
+// Create a fallback response for when Ollama is unavailable
+fn create_generate_fallback_response() -> Response<BoxBody> {
+    let response = serde_json::json!({
+        "model": "unknown",
+        "created_at": Local::now().to_rfc3339(),
+        "response": "Mock response (Ollama server unavailable)",
+        "done": true
+    });
+    json_response(&response, StatusCode::OK)
+}
+
 // Handle the special case of a generate request with model unloading instructions
 async fn handle_generate_with_model_info(
     req: Request<hyper::body::Incoming>,
@@ -342,32 +406,7 @@ async fn handle_generate_with_model_info(
     // If we have the body bytes, try to log helpful information
     if let Some(ref body_bytes) = maybe_body_bytes {
         if let Ok(json) = serde_json::from_slice::<serde_json::Value>(body_bytes) {
-            if let Some(model) = json.get("model").and_then(|m| m.as_str()) {
-                let is_unload_request = json
-                    .get("prompt")
-                    .and_then(|p| p.as_str())
-                    .is_some_and(str::is_empty)
-                    && (json
-                        .get("options")
-                        .and_then(|o| o.as_object())
-                        .and_then(|o| o.get("keep_alive"))
-                        .and_then(serde_json::Value::as_i64)
-                        == Some(0));
-
-                if is_unload_request {
-                    ollama_config
-                        .logger
-                        .log(&format!("Unloading model from memory: {model}"))
-                        .await;
-                } else {
-                    ollama_config
-                        .logger
-                        .log(&format!(
-                            "Forwarding generate request to Ollama for model: {model}"
-                        ))
-                        .await;
-                }
-            }
+            log_model_info(&json, &ollama_config.logger).await;
         }
     }
 
@@ -390,21 +429,16 @@ async fn handle_generate_with_model_info(
         .expect("Failed to create request");
 
     // Forward the request directly to Ollama
-    if let Ok(response) = proxy_to_ollama(req, "/api/generate", ollama_config).await {
-        response
-    } else {
-        // Fallback to mock response if Ollama is unavailable
-        ollama_config
-            .logger
-            .log("Failed to get response from Ollama, using mock response")
-            .await;
-        let response = serde_json::json!({
-            "model": "unknown",
-            "created_at": Local::now().to_rfc3339(),
-            "response": "Mock response (Ollama server unavailable)",
-            "done": true
-        });
-        json_response(&response, StatusCode::OK)
+    match proxy_to_ollama(req, "/api/generate", ollama_config).await {
+        Ok(response) => response,
+        Err(_) => {
+            // Fallback to mock response if Ollama is unavailable
+            ollama_config
+                .logger
+                .log("Failed to get response from Ollama, using mock response")
+                .await;
+            create_generate_fallback_response()
+        }
     }
 }
 
@@ -480,20 +514,115 @@ where
         .expect("Failed to create request");
 
     // Forward the request directly to Ollama
-    if let Ok(response) = proxy_to_ollama(req, path, ollama_config).await {
-        response
-    } else {
-        // Fallback to mock response if Ollama is unavailable
-        ollama_config
-            .logger
-            .log("Failed to get response from Ollama, using fallback response")
-            .await;
-        fallback_generator()
+    match proxy_to_ollama(req, path, ollama_config).await {
+        Ok(response) => response,
+        Err(_) => {
+            // Fallback to mock response if Ollama is unavailable
+            ollama_config
+                .logger
+                .log("Failed to get response from Ollama, using fallback response")
+                .await;
+            fallback_generator()
+        }
     }
 }
 
+// Function to handle proxy errors consistently
+fn handle_proxy_error(e: hyper::Error) -> Response<BoxBody> {
+    Response::builder()
+        .status(StatusCode::INTERNAL_SERVER_ERROR)
+        .body(full(format!("Error: {e}")))
+        .unwrap()
+}
+
+// Handle model listing endpoint with fallback
+async fn handle_models_endpoint(ollama_config: &Arc<OllamaConfig>) -> Response<BoxBody> {
+    handle_ollama_endpoint_with_fallback(
+        Method::GET,
+        "/api/tags",
+        ollama_config,
+        "Forwarding request to list models to Ollama",
+        || {
+            // Simulate a list of models
+            let models = serde_json::json!({
+                "models": [
+                    {
+                        "name": "llama2",
+                        "modified_at": "2023-08-02T17:02:23Z",
+                        "size": 3_791_730_298_u64,
+                        "digest": "sha256:a2...",
+                        "details": {
+                            "format": "gguf",
+                            "family": "llama",
+                            "parameter_size": "7B",
+                            "quantization_level": "Q4_0",
+                        },
+                    },
+                    {
+                        "name": "mistral",
+                        "modified_at": "2023-11-20T12:15:30Z",
+                        "size": 4_356_823_129_u64,
+                        "digest": "sha256:b1...",
+                        "details": {
+                            "format": "gguf",
+                            "family": "mistral",
+                            "parameter_size": "7B",
+                            "quantization_level": "Q5_K",
+                        },
+                    },
+                ],
+            });
+            json_response(&models, StatusCode::OK)
+        },
+    )
+    .await
+}
+
+// Handle authenticated model management endpoints
+async fn handle_model_management_endpoint(
+    req: Request<hyper::body::Incoming>,
+    ollama_config: &Arc<OllamaConfig>,
+    path: &str,
+    operation: &str,
+) -> Response<BoxBody> {
+    // Check authentication
+    if !is_authenticated(&req, ollama_config) {
+        return handle_unauthorized();
+    }
+
+    // Log the operation
+    let operation_description = format!("model {operation}");
+    ollama_config
+        .logger
+        .log(&format!(
+            "Forwarding {operation_description} request to Ollama"
+        ))
+        .await;
+
+    // Forward to Ollama server
+    proxy_to_ollama(req, path, ollama_config)
+        .await
+        .unwrap_or_else(handle_proxy_error)
+}
+
+// Forward any API request to Ollama (default handler)
+async fn forward_to_ollama(
+    req: Request<hyper::body::Incoming>,
+    ollama_config: &Arc<OllamaConfig>,
+    path: &str,
+) -> Response<BoxBody> {
+    ollama_config
+        .logger
+        .log(&format!("Forwarding request to Ollama: {path}"))
+        .await;
+
+    proxy_to_ollama(req, path, ollama_config)
+        .await
+        .unwrap_or_else(handle_proxy_error)
+}
+
 // Handle API endpoints based on their route pattern
-// This unified function handles all Ollama API endpoints with appropriate auth and fallback handling
+// This unified function routes requests to appropriate specialized handlers
 async fn handle_api_endpoint(
     req: Request<hyper::body::Incoming>,
     ollama_config: &Arc<OllamaConfig>,
@@ -509,48 +638,8 @@ async fn handle_api_endpoint(
             handle_generate_with_model_info(req, ollama_config).await
         }
 
-        // List models endpoint - Use generic fallback handler
-        (Method::GET, ["api", "tags"]) => {
-            handle_ollama_endpoint_with_fallback(
-                Method::GET,
-                "/api/tags",
-                ollama_config,
-                "Forwarding request to list models to Ollama",
-                || {
-                    // Simulate a list of models
-                    let models = serde_json::json!({
-                        "models": [
-                            {
-                                "name": "llama2",
-                                "modified_at": "2023-08-02T17:02:23Z",
-                                "size": 3_791_730_298_u64,
-                                "digest": "sha256:a2...",
-                                "details": {
-                                    "format": "gguf",
-                                    "family": "llama",
-                                    "parameter_size": "7B",
-                                    "quantization_level": "Q4_0",
-                                },
-                            },
-                            {
-                                "name": "mistral",
-                                "modified_at": "2023-11-20T12:15:30Z",
-                                "size": 4_356_823_129_u64,
-                                "digest": "sha256:b1...",
-                                "details": {
-                                    "format": "gguf",
-                                    "family": "mistral",
-                                    "parameter_size": "7B",
-                                    "quantization_level": "Q5_K",
-                                },
-                            },
-                        ],
-                    });
-                    json_response(&models, StatusCode::OK)
-                },
-            )
-            .await
-        }
+        // List models endpoint - Specialized handler with fallback
+        (Method::GET, ["api", "tags"]) => handle_models_endpoint(ollama_config).await,
 
         // Model management endpoints with authentication
         (Method::POST, ["api", "create"])
@@ -558,50 +647,12 @@ async fn handle_api_endpoint(
         | (Method::POST, ["api", "pull"])
         | (Method::POST, ["api", "push"])
         | (Method::DELETE, ["api", "delete"]) => {
-            // Get the operation name (create, copy, delete, etc.)
             let operation = path_parts[1];
-
-            // Check authentication
-            if !is_authenticated(&req, ollama_config) {
-                return handle_unauthorized();
-            }
-
-            // Log the operation
-            let operation_description = format!("model {operation}");
-            ollama_config
-                .logger
-                .log(&format!(
-                    "Forwarding {operation_description} request to Ollama"
-                ))
-                .await;
-
-            // Forward to Ollama server
-            proxy_to_ollama(req, path, ollama_config)
-                .await
-                .unwrap_or_else(|e| {
-                    Response::builder()
-                        .status(StatusCode::INTERNAL_SERVER_ERROR)
-                        .body(full(format!("Error: {e}")))
-                        .unwrap()
-                })
+            handle_model_management_endpoint(req, ollama_config, path, operation).await
         }
 
         // Default case: Forward the request directly to Ollama
-        _ => {
-            ollama_config
-                .logger
-                .log(&format!("Forwarding request to Ollama: {path}"))
-                .await;
-
-            proxy_to_ollama(req, path, ollama_config)
-                .await
-                .unwrap_or_else(|e| {
-                    Response::builder()
-                        .status(StatusCode::INTERNAL_SERVER_ERROR)
-                        .body(full(format!("Error: {e}")))
-                        .unwrap()
-                })
-        }
+        _ => forward_to_ollama(req, ollama_config, path).await,
     }
 }
 
