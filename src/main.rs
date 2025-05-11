@@ -343,22 +343,35 @@ fn handle_unauthorized() -> Response<BoxBody> {
 
 // Helper to check if a request is an unload model request
 fn is_unload_model_request(json: &serde_json::Value) -> bool {
-    json.get("prompt")
-        .and_then(|p| p.as_str())
-        .is_some_and(str::is_empty)
-        && (json
+    // Per Ollama docs, an empty prompt (or no prompt) with keep_alive: 0 unloads a model
+
+    // If keep_alive is not 0, then this is definitely not an unload request
+    let keep_alive_is_zero = json.get("keep_alive").and_then(serde_json::Value::as_i64) == Some(0)
+        || (json
             .get("options")
             .and_then(|o| o.as_object())
             .and_then(|o| o.get("keep_alive"))
             .and_then(serde_json::Value::as_i64)
-            == Some(0))
+            == Some(0));
+
+    if !keep_alive_is_zero {
+        return false;
+    }
+
+    // According to Ollama API docs, either:
+    // 1. No prompt field at all, or
+    // 2. An empty prompt field
+    // combined with keep_alive: 0 indicates an unload request
+    let prompt_is_empty = match json.get("prompt") {
+        Some(prompt) => prompt.as_str().map_or(false, |s| s.is_empty()),
+        None => true, // No prompt field is valid for unload request
+    };
+
+    prompt_is_empty
 }
 
 // Extract and log model information from generate request
-async fn log_model_info(
-    json: &serde_json::Value,
-    logger: &Logger,
-) {
+async fn log_model_info(json: &serde_json::Value, logger: &Logger) {
     if let Some(model) = json.get("model").and_then(|m| m.as_str()) {
         let is_unload_request = is_unload_model_request(json);
 
@@ -392,6 +405,9 @@ async fn handle_generate_with_model_info(
     req: Request<hyper::body::Incoming>,
     ollama_config: &Arc<OllamaConfig>,
 ) -> Response<BoxBody> {
+    // Save the headers for potential authentication check before consuming the request
+    let headers = req.headers().clone();
+
     // Try to examine the body to log info without consuming it
     let (_parts, body) = req.into_parts();
     let maybe_body_bytes = match body.collect().await {
@@ -403,10 +419,55 @@ async fn handle_generate_with_model_info(
         }
     };
 
-    // If we have the body bytes, try to log helpful information
+    // If we have the body bytes, check for unload request and authentication
     if let Some(ref body_bytes) = maybe_body_bytes {
         if let Ok(json) = serde_json::from_slice::<serde_json::Value>(body_bytes) {
-            log_model_info(&json, &ollama_config.logger).await;
+            // Check if this is an unload request
+            if is_unload_model_request(&json) {
+                // For unload requests, we need to check authentication using the API key
+                // If no API key is configured, allow all requests
+                let is_auth = if let Some(ref api_key) = ollama_config.api_key {
+                    // Check for Authorization header
+                    if let Some(auth_header) = headers.get("Authorization") {
+                        if let Ok(auth_str) = auth_header.to_str() {
+                            // Format expected is "Bearer <api_key>"
+                            if let Some(key) = auth_str.strip_prefix("Bearer ") {
+                                key == api_key
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                } else {
+                    true // No API key required
+                };
+
+                // Unload requests require authentication
+                if !is_auth {
+                    ollama_config
+                        .logger
+                        .log("Unauthorized attempt to unload model")
+                        .await;
+                    return handle_unauthorized();
+                }
+
+                // Log that we're unloading a model (authenticated)
+                if let Some(model) = json.get("model").and_then(|m| m.as_str()) {
+                    ollama_config
+                        .logger
+                        .log(&format!(
+                            "Unloading model from memory (authenticated): {model}"
+                        ))
+                        .await;
+                }
+            } else {
+                // Normal generate request, just log it
+                log_model_info(&json, &ollama_config.logger).await;
+            }
         }
     }
 
