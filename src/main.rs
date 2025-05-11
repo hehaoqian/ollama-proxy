@@ -286,16 +286,27 @@ where
 }
 
 // Helper function to log incoming requests
-async fn log_request(logger: &Logger, method: &Method, path: &str) {
+async fn log_request(logger: &Logger, method: &Method, path: &str, client_ip: &SocketAddr) {
     let now = Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
-    logger.log(&format!("[{now}] {method} {path}")).await;
+    logger
+        .log(&format!("[{now}] {client_ip} {method} {path}"))
+        .await;
 }
 
 // Helper function to log responses
-async fn log_response(logger: &Logger, method: &Method, path: &str, status: &StatusCode) {
+async fn log_response(
+    logger: &Logger,
+    method: &Method,
+    path: &str,
+    status: &StatusCode,
+    client_ip: &SocketAddr,
+) {
     let now = Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
     logger
-        .log(&format!("[{now}] {method} {path} - {}", status.as_u16()))
+        .log(&format!(
+            "[{now}] {client_ip} {method} {path} - {}",
+            status.as_u16()
+        ))
         .await;
 }
 
@@ -371,18 +382,20 @@ fn is_unload_model_request(json: &serde_json::Value) -> bool {
 }
 
 // Extract and log model information from generate request
-async fn log_model_info(json: &serde_json::Value, logger: &Logger) {
+async fn log_model_info(json: &serde_json::Value, logger: &Logger, client_ip: &SocketAddr) {
     if let Some(model) = json.get("model").and_then(|m| m.as_str()) {
         let is_unload_request = is_unload_model_request(json);
 
         if is_unload_request {
             logger
-                .log(&format!("Unloading model from memory: {model}"))
+                .log(&format!(
+                    "Unloading model from memory from {client_ip}: {model}"
+                ))
                 .await;
         } else {
             logger
                 .log(&format!(
-                    "Forwarding generate request to Ollama for model: {model}"
+                    "Forwarding generate request to Ollama from {client_ip} for model: {model}"
                 ))
                 .await;
         }
@@ -404,6 +417,7 @@ fn create_generate_fallback_response() -> Response<BoxBody> {
 async fn handle_generate_with_model_info(
     req: Request<hyper::body::Incoming>,
     ollama_config: &Arc<OllamaConfig>,
+    client_ip: &SocketAddr,
 ) -> Response<BoxBody> {
     // Save the headers for potential authentication check before consuming the request
     let headers = req.headers().clone();
@@ -450,7 +464,9 @@ async fn handle_generate_with_model_info(
                 if !is_auth {
                     ollama_config
                         .logger
-                        .log("Unauthorized attempt to unload model")
+                        .log(&format!(
+                            "Unauthorized attempt to unload model from {client_ip}"
+                        ))
                         .await;
                     return handle_unauthorized();
                 }
@@ -460,13 +476,13 @@ async fn handle_generate_with_model_info(
                     ollama_config
                         .logger
                         .log(&format!(
-                            "Unloading model from memory (authenticated): {model}"
+                            "Unloading model from memory (authenticated) from {client_ip}: {model}"
                         ))
                         .await;
                 }
             } else {
                 // Normal generate request, just log it
-                log_model_info(&json, &ollama_config.logger).await;
+                log_model_info(&json, &ollama_config.logger, client_ip).await;
             }
         }
     }
@@ -496,7 +512,9 @@ async fn handle_generate_with_model_info(
             // Fallback to mock response if Ollama is unavailable
             ollama_config
                 .logger
-                .log("Failed to get response from Ollama, using mock response")
+                .log(&format!(
+                    "Failed to get response from Ollama for {client_ip}, using mock response"
+                ))
                 .await;
             create_generate_fallback_response()
         }
@@ -597,12 +615,15 @@ fn handle_proxy_error(e: hyper::Error) -> Response<BoxBody> {
 }
 
 // Handle model listing endpoint with fallback
-async fn handle_models_endpoint(ollama_config: &Arc<OllamaConfig>) -> Response<BoxBody> {
+async fn handle_models_endpoint(
+    ollama_config: &Arc<OllamaConfig>,
+    client_ip: &SocketAddr,
+) -> Response<BoxBody> {
     handle_ollama_endpoint_with_fallback(
         Method::GET,
         "/api/tags",
         ollama_config,
-        "Forwarding request to list models to Ollama",
+        &format!("Forwarding request to list models to Ollama from {client_ip}"),
         || {
             // Simulate a list of models
             let models = serde_json::json!({
@@ -645,9 +666,16 @@ async fn handle_model_management_endpoint(
     ollama_config: &Arc<OllamaConfig>,
     path: &str,
     operation: &str,
+    client_ip: &SocketAddr,
 ) -> Response<BoxBody> {
     // Check authentication
     if !is_authenticated(&req, ollama_config) {
+        ollama_config
+            .logger
+            .log(&format!(
+                "Unauthorized request from {client_ip} for operation: {operation}"
+            ))
+            .await;
         return handle_unauthorized();
     }
 
@@ -656,7 +684,7 @@ async fn handle_model_management_endpoint(
     ollama_config
         .logger
         .log(&format!(
-            "Forwarding {operation_description} request to Ollama"
+            "Forwarding {operation_description} request to Ollama from {client_ip}"
         ))
         .await;
 
@@ -671,10 +699,13 @@ async fn forward_to_ollama(
     req: Request<hyper::body::Incoming>,
     ollama_config: &Arc<OllamaConfig>,
     path: &str,
+    client_ip: &SocketAddr,
 ) -> Response<BoxBody> {
     ollama_config
         .logger
-        .log(&format!("Forwarding request to Ollama: {path}"))
+        .log(&format!(
+            "Forwarding request to Ollama from {client_ip}: {path}"
+        ))
         .await;
 
     proxy_to_ollama(req, path, ollama_config)
@@ -688,6 +719,7 @@ async fn handle_api_endpoint(
     req: Request<hyper::body::Incoming>,
     ollama_config: &Arc<OllamaConfig>,
     path: &str,
+    client_ip: &SocketAddr,
 ) -> Response<BoxBody> {
     // Extract method and path components for routing
     let method = req.method().clone();
@@ -696,11 +728,11 @@ async fn handle_api_endpoint(
     match (method, path_parts.as_slice()) {
         // Generate endpoint - Forward with model info handling
         (Method::POST, ["api", "generate"]) => {
-            handle_generate_with_model_info(req, ollama_config).await
+            handle_generate_with_model_info(req, ollama_config, client_ip).await
         }
 
         // List models endpoint - Specialized handler with fallback
-        (Method::GET, ["api", "tags"]) => handle_models_endpoint(ollama_config).await,
+        (Method::GET, ["api", "tags"]) => handle_models_endpoint(ollama_config, client_ip).await,
 
         // Model management endpoints with authentication
         (Method::POST, ["api", "create"])
@@ -709,11 +741,11 @@ async fn handle_api_endpoint(
         | (Method::POST, ["api", "push"])
         | (Method::DELETE, ["api", "delete"]) => {
             let operation = path_parts[1];
-            handle_model_management_endpoint(req, ollama_config, path, operation).await
+            handle_model_management_endpoint(req, ollama_config, path, operation, client_ip).await
         }
 
         // Default case: Forward the request directly to Ollama
-        _ => forward_to_ollama(req, ollama_config, path).await,
+        _ => forward_to_ollama(req, ollama_config, path, client_ip).await,
     }
 }
 
@@ -721,12 +753,13 @@ async fn handle_api_endpoint(
 async fn handle_request(
     req: Request<hyper::body::Incoming>,
     ollama_config: std::sync::Arc<OllamaConfig>,
+    client_ip: SocketAddr,
 ) -> Result<Response<BoxBody>, hyper::Error> {
     let method = req.method().clone();
     let uri_path = req.uri().path().to_string();
 
     // Log the incoming request
-    log_request(&ollama_config.logger, &method, &uri_path).await;
+    log_request(&ollama_config.logger, &method, &uri_path, &client_ip).await;
 
     let response = match (method.clone(), uri_path.as_str()) {
         // API documentation
@@ -734,7 +767,7 @@ async fn handle_request(
 
         // Proxy any Ollama API endpoints directly through our unified handler
         (_, path) if path.starts_with("/api/") => {
-            handle_api_endpoint(req, &ollama_config, path).await
+            handle_api_endpoint(req, &ollama_config, path, &client_ip).await
         }
 
         // Return 404 Not Found for any other request
@@ -747,6 +780,7 @@ async fn handle_request(
         &method,
         &uri_path,
         &response.status(),
+        &client_ip,
     )
     .await;
 
@@ -833,12 +867,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Clone the configuration for this connection
         let ollama_config = ollama_config.clone();
+        // Save the client IP for this connection
+        let client_ip = addr;
 
         // Spawn a new task for each connection
         tokio::task::spawn(async move {
             let service = hyper::service::service_fn(move |req| {
                 let config = ollama_config.clone();
-                async move { handle_request(req, config).await }
+                let client_addr = client_ip;
+                async move { handle_request(req, config, client_addr).await }
             });
 
             if let Err(err) = http1::Builder::new().serve_connection(io, service).await {
