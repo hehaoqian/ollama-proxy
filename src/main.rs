@@ -213,7 +213,7 @@ fn create_error_response(status: StatusCode, message: String) -> Response<BoxBod
 }
 
 // Build the URI for an Ollama request
-async fn build_ollama_uri(
+fn build_ollama_uri(
     path: &str,
     ollama_config: &Arc<OllamaConfig>,
 ) -> Result<hyper::Uri, hyper::http::uri::InvalidUri> {
@@ -263,7 +263,7 @@ where
     };
 
     // Build the full URI
-    let uri = match build_ollama_uri(path, ollama_config).await {
+    let uri = match build_ollama_uri(path, ollama_config) {
         Ok(uri) => uri,
         Err(e) => {
             let err_msg = format!("Error parsing URI for path {path}: {e}");
@@ -427,7 +427,7 @@ fn is_unload_model_request(json: &serde_json::Value) -> bool {
     // 2. An empty prompt field
     // combined with keep_alive: 0 indicates an unload request
     let prompt_is_empty = match json.get("prompt") {
-        Some(prompt) => prompt.as_str().is_some_and(|s| s.is_empty()),
+        Some(prompt) => prompt.as_str().is_some_and(str::is_empty),
         None => true, // No prompt field is valid for unload request
     };
 
@@ -559,18 +559,17 @@ async fn handle_generate_with_model_info(
         .expect("Failed to create request");
 
     // Forward the request directly to Ollama
-    match proxy_to_ollama(req, "/api/generate", ollama_config).await {
-        Ok(response) => response,
-        Err(_) => {
-            // Fallback to mock response if Ollama is unavailable
-            ollama_config
-                .logger
-                .log(&format!(
-                    "Failed to get response from Ollama for {client_ip}, using mock response"
-                ))
-                .await;
-            create_generate_fallback_response()
-        }
+    if let Ok(response) = proxy_to_ollama(req, "/api/generate", ollama_config).await {
+        response
+    } else {
+        // Fallback to mock response if Ollama is unavailable
+        ollama_config
+            .logger
+            .log(&format!(
+                "Failed to get response from Ollama for {client_ip}, using mock response"
+            ))
+            .await;
+        create_generate_fallback_response()
     }
 }
 
@@ -672,7 +671,7 @@ where
 }
 
 // Function to handle proxy errors consistently
-fn handle_proxy_error(e: hyper::Error) -> Response<BoxBody> {
+fn handle_proxy_error(e: &hyper::Error) -> Response<BoxBody> {
     Response::builder()
         .status(StatusCode::INTERNAL_SERVER_ERROR)
         .body(full(format!("Error: {e}")))
@@ -756,7 +755,7 @@ async fn handle_model_management_endpoint(
     // Forward to Ollama server
     proxy_to_ollama(req, path, ollama_config)
         .await
-        .unwrap_or_else(handle_proxy_error)
+        .unwrap_or_else(|e| handle_proxy_error(&e))
 }
 
 // Forward any API request to Ollama (default handler)
@@ -775,7 +774,7 @@ async fn forward_to_ollama(
 
     proxy_to_ollama(req, path, ollama_config)
         .await
-        .unwrap_or_else(handle_proxy_error)
+        .unwrap_or_else(|e| handle_proxy_error(&e))
 }
 
 // Handle API endpoints based on their route pattern
@@ -800,11 +799,8 @@ async fn handle_api_endpoint(
         (Method::GET, ["api", "tags"]) => handle_models_endpoint(ollama_config, client_ip).await,
 
         // Model management endpoints with authentication
-        (Method::POST, ["api", "create"])
-        | (Method::POST, ["api", "copy"])
-        | (Method::POST, ["api", "pull"])
-        | (Method::POST, ["api", "push"])
-        | (Method::DELETE, ["api", "delete"]) => {
+        (Method::POST, ["api", "create" | "copy" | "pull" | "push"]) |
+        (Method::DELETE, ["api", "delete"]) => {
             let operation = path_parts[1];
             handle_model_management_endpoint(req, ollama_config, path, operation, client_ip).await
         }
@@ -820,8 +816,7 @@ fn handle_ip_blocked(client_ip: &SocketAddr) -> Response<BoxBody> {
         .status(StatusCode::FORBIDDEN)
         .header("Content-Type", "application/json")
         .body(full(format!(
-            r#"{{"error":"Forbidden - IP address {} is not allowed"}}"#,
-            client_ip
+            r#"{{"error":"Forbidden - IP address {client_ip} is not allowed"}}"#
         )))
         .unwrap()
 }
@@ -915,7 +910,7 @@ fn load_tls_config(cert_path: &PathBuf, key_path: &PathBuf) -> Result<ServerConf
     let cert_file = File::open(cert_path)?;
     let mut cert_reader = BufReader::new(cert_file);
     let mut cert_chain = Vec::new();
-    
+
     for cert_result in certs(&mut cert_reader) {
         let cert = cert_result?;
         cert_chain.push(cert);
@@ -929,7 +924,7 @@ fn load_tls_config(cert_path: &PathBuf, key_path: &PathBuf) -> Result<ServerConf
     let key_file = File::open(key_path)?;
     let mut key_reader = BufReader::new(key_file);
     let mut private_keys = Vec::new();
-    
+
     for key_result in pkcs8_private_keys(&mut key_reader) {
         let key = key_result?;
         private_keys.push(key);
