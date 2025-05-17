@@ -21,6 +21,9 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc::{self, Sender};
 use tokio_rustls::TlsAcceptor;
 
+mod size_parser;
+use size_parser::parse_size;
+
 // A simple type alias for convenience
 type BoxBody = http_body_util::combinators::BoxBody<Bytes, hyper::Error>;
 
@@ -65,9 +68,10 @@ struct Args {
     #[arg(long)]
     listen_public: bool,
 
-    /// Maximum log file size in MB before rotation (default: 10MB)
-    #[arg(long, default_value_t = 10)]
-    log_rotate_size: u64,
+    /// Maximum log file size before rotation (default: 10MB)
+    /// Supports human-readable formats like "10MB", "1GB", "500KB", etc.
+    #[arg(long, default_value = "10MB")]
+    log_rotate_size: String,
 }
 
 // Logger that can write to both console and file
@@ -76,9 +80,19 @@ struct Logger {
 }
 
 impl Logger {
-    async fn new(log_path: Option<PathBuf>, max_size_mb: u64) -> Self {
-        // Convert MB to bytes
-        let max_size_bytes = max_size_mb * 1024 * 1024;
+    async fn new(log_path: Option<PathBuf>, log_size_str: String) -> Self {
+        // Parse the human-readable size format
+        let max_size_bytes = match parse_size(&log_size_str) {
+            Ok(size) => size,
+            Err(e) => {
+                eprintln!(
+                    "Error parsing log rotation size '{}': {:?}",
+                    log_size_str, e
+                );
+                eprintln!("Using default size of 10MB");
+                10 * 1024 * 1024 // Default to 10MB if parsing fails
+            }
+        };
 
         // Create a channel for logging messages
         let (log_sender, mut log_receiver) = mpsc::channel::<String>(100);
@@ -181,9 +195,7 @@ impl Logger {
             }
         });
 
-        Self {
-            log_sender,
-        }
+        Self { log_sender }
     }
 
     async fn log(&self, message: &str) {
@@ -1107,7 +1119,7 @@ async fn run_http_server(
     if let Some(ref log_path) = args.log_file {
         logger
             .log(&format!(
-                "Logging to file: {} (rotation at {}MB)",
+                "Logging to file: {} (rotation at {})",
                 log_path.display(),
                 args.log_rotate_size
             ))
@@ -1374,7 +1386,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr = SocketAddr::from((ip, args.port));
 
     // Create logger
-    let logger = Arc::new(Logger::new(args.log_file.clone(), args.log_rotate_size).await);
+    let logger = Arc::new(Logger::new(args.log_file.clone(), args.log_rotate_size.clone()).await);
 
     // Check HTTPS configuration
     if args.https {
