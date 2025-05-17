@@ -190,8 +190,14 @@ pub async fn cleanup_old_log_files(
             let b_meta = std::fs::metadata(b).ok();
 
             match (a_meta, b_meta) {
-                (Some(a_meta), Some(b_meta)) => a_meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH)
-                    .cmp(&b_meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH)),
+                (Some(a_meta), Some(b_meta)) => a_meta
+                    .modified()
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+                    .cmp(
+                        &b_meta
+                            .modified()
+                            .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+                    ),
                 _ => std::cmp::Ordering::Equal,
             }
         });
@@ -214,9 +220,9 @@ mod tests {
     use super::*;
     use std::fs;
     use std::io::Write;
+    use std::time::Duration;
     use tempfile::tempdir;
     use tokio::time::sleep;
-    use std::time::Duration;
 
     #[tokio::test]
     async fn test_logger_creation() {
@@ -265,7 +271,8 @@ mod tests {
         {
             let mut file = fs::File::create(&log_path).expect("Failed to create log file");
             // Write 90 bytes to the file
-            file.write_all(&[b'x'; 90]).expect("Failed to write to log file");
+            file.write_all(&[b'x'; 90])
+                .expect("Failed to write to log file");
         }
 
         // Create a logger with a 100 byte rotation threshold
@@ -292,66 +299,88 @@ mod tests {
         }
 
         assert!(rotated_found, "Log rotation did not create a rotated file");
-    }    #[tokio::test]
+    }
+    #[tokio::test]
     async fn test_max_log_files() {
         // Create a temporary directory
         let temp_dir = tempdir().expect("Failed to create temp directory");
         let log_path = temp_dir.path().join("max_test.log");
-        
+
         // Create initial log file
         {
             let mut file = fs::File::create(&log_path).expect("Failed to create log file");
-            file.write_all(b"initial content").expect("Failed to write to log file");
+            file.write_all(b"initial content")
+                .expect("Failed to write to log file");
         }
-        
+
         // Create 5 rotated log files
         for i in 1..=5 {
-            let rotated_path = temp_dir.path().join(format!("max_test.log.2025051{}_120000", i));
-            fs::write(&rotated_path, format!("rotated content {}", i)).expect("Failed to create rotated file");
+            let rotated_path = temp_dir
+                .path()
+                .join(format!("max_test.log.2025051{}_120000", i));
+            fs::write(&rotated_path, format!("rotated content {}", i))
+                .expect("Failed to create rotated file");
             // Set modification time to ensure proper ordering
             // Note: This is OS-specific and might not work in all environments
             #[cfg(unix)]
             {
                 let now = std::time::SystemTime::now();
-                let seconds = now.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() - (5 - i) * 3600;
+                let seconds =
+                    now.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() - (5 - i) * 3600;
                 let times = filetime::FileTime::from_unix_time(seconds as i64, 0);
                 filetime::set_file_mtime(&rotated_path, times).expect("Failed to set file time");
             }
         }
-        
+
         // Manually run cleanup with max 3 rotated files
-        cleanup_old_log_files(&log_path, 3).await.expect("Failed to clean up log files");
-        
+        cleanup_old_log_files(&log_path, 3)
+            .await
+            .expect("Failed to clean up log files");
+
         // Count rotated files after manual cleanup
         let rotated_count = count_rotated_files(temp_dir.path(), "max_test.log").await;
-        assert_eq!(rotated_count, 3, "Incorrect number of files after manual cleanup");
-        
+        assert_eq!(
+            rotated_count, 3,
+            "Incorrect number of files after manual cleanup"
+        );
+
         // Create a new logger with max 3 rotated files
         let logger = Logger::new(Some(log_path.clone()), "100B".to_string(), 3).await;
-        
+
         // Log enough data to trigger a rotation
         for i in 0..30 {
-            logger.log(&format!("Log message {} to trigger rotation", i)).await;
+            logger
+                .log(&format!("Log message {} to trigger rotation", i))
+                .await;
             // Small delay to ensure logs are processed
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        
+
         // Allow time for cleanup to finish
         tokio::time::sleep(Duration::from_millis(500)).await;
-        
+
         // Count rotated files again after rotation
         let final_count = count_rotated_files(temp_dir.path(), "max_test.log").await;
-        
+
         // Should still be 3 rotated files (max_files setting)
-        assert_eq!(final_count, 3, "Incorrect number of rotated files after logger rotation");
+        assert_eq!(
+            final_count, 3,
+            "Incorrect number of rotated files after logger rotation"
+        );
     }
-    
+
     // Helper function to count rotated log files
     async fn count_rotated_files(dir_path: &std::path::Path, base_name: &str) -> usize {
         let mut count = 0;
-        let mut dir = tokio::fs::read_dir(dir_path).await.expect("Failed to read directory");
-        
-        while let Some(entry) = dir.next_entry().await.expect("Failed to get directory entry") {
+        let mut dir = tokio::fs::read_dir(dir_path)
+            .await
+            .expect("Failed to read directory");
+
+        while let Some(entry) = dir
+            .next_entry()
+            .await
+            .expect("Failed to get directory entry")
+        {
             let path = entry.path();
             if let Some(file_name) = path.file_name() {
                 let name = file_name.to_string_lossy();
@@ -361,7 +390,7 @@ mod tests {
                 }
             }
         }
-        
+
         count
     }
 }

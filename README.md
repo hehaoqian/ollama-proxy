@@ -50,6 +50,26 @@ To make the server publicly accessible on all network interfaces:
 cargo run -- --https --cert-file ./certs/server.crt --key-file ./certs/server.key --listen-public
 ```
 
+### Using Environment Variables
+
+All command-line arguments can also be specified using environment variables with the `PROXY_OLLAMA_` prefix. For example:
+
+```bash
+export PROXY_OLLAMA_PORT=3001
+export PROXY_OLLAMA_URL="http://localhost:11434"
+export PROXY_OLLAMA_API_KEY="your-secret-key"
+export PROXY_OLLAMA_ALLOWED_IPS="127.0.0.1,192.168.1.5"
+export PROXY_OLLAMA_HTTPS=true
+export PROXY_OLLAMA_CERT_FILE="./certs/server.crt"
+export PROXY_OLLAMA_KEY_FILE="./certs/server.key"
+export PROXY_OLLAMA_LISTEN_PUBLIC=true
+export PROXY_OLLAMA_LOG_FILE="./proxy.log"
+export PROXY_OLLAMA_LOG_ROTATE_SIZE="10MB"
+export PROXY_OLLAMA_MAX_LOG_FILES=5
+
+cargo run
+```
+
 ## Command-Line Options
 
 | Option | Description |

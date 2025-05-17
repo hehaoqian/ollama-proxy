@@ -19,10 +19,10 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 
-mod size_parser;
 mod logger;
 #[cfg(test)]
 mod logger_tests;
+mod size_parser;
 
 use logger::Logger;
 
@@ -34,50 +34,55 @@ type BoxBody = http_body_util::combinators::BoxBody<Bytes, hyper::Error>;
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Port to listen on
-    #[arg(short, long, default_value_t = 3001)]
+    #[arg(short, long, default_value_t = 3001, env = "PROXY_OLLAMA_PORT")]
     port: u16,
 
     /// Ollama server URL
-    #[arg(short, long, default_value = "http://localhost:11434")]
+    #[arg(
+        short,
+        long,
+        default_value = "http://localhost:11434",
+        env = "PROXY_OLLAMA_URL"
+    )]
     ollama_url: String,
 
     /// Output log file (if not specified, logs go to stdout only)
-    #[arg(short, long)]
+    #[arg(short, long, env = "PROXY_OLLAMA_LOG_FILE")]
     log_file: Option<PathBuf>,
 
     /// API key required for model management endpoints (create, copy, delete, pull, push)
-    #[arg(short, long)]
+    #[arg(short, long, env = "PROXY_OLLAMA_API_KEY")]
     api_key: Option<String>,
 
     /// List of allowed IP addresses (comma-separated). If specified, only these IPs can access the server.
     /// Example: --allowed-ips "127.0.0.1,192.168.1.5"
-    #[arg(long)]
+    #[arg(long, env = "PROXY_OLLAMA_ALLOWED_IPS")]
     allowed_ips: Option<String>,
 
     /// Enable HTTPS mode. If not set, server will use HTTP
-    #[arg(long)]
+    #[arg(long, env = "PROXY_OLLAMA_HTTPS")]
     https: bool,
 
     /// TLS certificate file path (required when HTTPS is enabled)
-    #[arg(long)]
+    #[arg(long, env = "PROXY_OLLAMA_CERT_FILE")]
     cert_file: Option<PathBuf>,
 
     /// TLS private key file path (required when HTTPS is enabled)
-    #[arg(long)]
+    #[arg(long, env = "PROXY_OLLAMA_KEY_FILE")]
     key_file: Option<PathBuf>,
 
     /// Listen on all network interfaces instead of just localhost
-    #[arg(long)]
+    #[arg(long, env = "PROXY_OLLAMA_LISTEN_PUBLIC")]
     listen_public: bool,
 
     /// Maximum log file size before rotation (default: 10MB)
     /// Supports human-readable formats like "10MB", "1GB", "500KB", etc.
-    #[arg(long, default_value = "10MB")]
+    #[arg(long, default_value = "10MB", env = "PROXY_OLLAMA_LOG_ROTATE_SIZE")]
     log_rotate_size: String,
 
     /// Maximum number of rotated log files to keep (default: 0, unlimited)
     /// When this limit is reached, the oldest log files will be deleted
-    #[arg(long, default_value_t = 0)]
+    #[arg(long, default_value_t = 0, env = "PROXY_OLLAMA_MAX_LOG_FILES")]
     max_log_files: u32,
 }
 
@@ -1207,7 +1212,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr = SocketAddr::from((ip, args.port));
 
     // Create logger
-    let logger = Arc::new(Logger::new(args.log_file.clone(), args.log_rotate_size.clone(), args.max_log_files).await);
+    let logger = Arc::new(
+        Logger::new(
+            args.log_file.clone(),
+            args.log_rotate_size.clone(),
+            args.max_log_files,
+        )
+        .await,
+    );
+
+    // Log startup configuration information
+    logger.log("Ollama Proxy Server starting up").await;
+    logger.log("Arguments can be provided via command line or environment variables with prefix PROXY_OLLAMA_").await;
 
     // Check HTTPS configuration
     if args.https {

@@ -1,10 +1,10 @@
 //! Test suite for the logger module.
 
-use tokio::test;
+use std::time::Duration;
 use tempfile::tempdir;
 use tokio::fs;
+use tokio::test;
 use tokio::time::sleep;
-use std::time::Duration;
 
 use crate::logger::{Logger, cleanup_old_log_files};
 
@@ -47,14 +47,18 @@ async fn test_log_rotation() {
     let log_path = temp_dir.path().join("rotation.log");
 
     // Create a log file with initial content
-    fs::write(&log_path, "Initial content that takes up space").await.unwrap();
+    fs::write(&log_path, "Initial content that takes up space")
+        .await
+        .unwrap();
 
     // Create a logger with a small rotation size
     let logger = Logger::new(Some(log_path.clone()), "50B".to_string(), 3).await;
 
     // Log messages to trigger rotation
     for i in 1..=10 {
-        logger.log(&format!("Log message {i} to trigger rotation")).await;
+        logger
+            .log(&format!("Log message {i} to trigger rotation"))
+            .await;
         // Small delay to ensure logs are processed
         sleep(Duration::from_millis(50)).await;
     }
@@ -84,22 +88,30 @@ async fn test_max_log_files() {
     // Create a temporary directory
     let temp_dir = tempdir().unwrap();
     let base_path = temp_dir.path().join("max_test.log");
-    
+
     // Create several rotated log files with timestamps
-    let timestamps = ["20250101_120000", "20250101_120100", "20250101_120200", "20250101_120300", "20250101_120400"];
-    
+    let timestamps = [
+        "20250101_120000",
+        "20250101_120100",
+        "20250101_120200",
+        "20250101_120300",
+        "20250101_120400",
+    ];
+
     for ts in timestamps.iter() {
         let rotated_path = temp_dir.path().join(format!("max_test.log.{}", ts));
-        fs::write(&rotated_path, format!("Rotated content for {}", ts)).await.unwrap();
+        fs::write(&rotated_path, format!("Rotated content for {}", ts))
+            .await
+            .unwrap();
     }
-    
+
     // Run cleanup with max 2 files
     cleanup_old_log_files(&base_path, 2).await.unwrap();
-    
+
     // Count remaining files
     let mut dir_entries = fs::read_dir(temp_dir.path()).await.unwrap();
     let mut remaining_files = 0;
-    
+
     while let Some(entry) = dir_entries.next_entry().await.unwrap() {
         let path = entry.path();
         if let Some(file_name) = path.file_name() {
@@ -108,7 +120,10 @@ async fn test_max_log_files() {
             }
         }
     }
-    
+
     // Should be exactly 2 files left (our specified max)
-    assert_eq!(remaining_files, 2, "Incorrect number of files remaining after cleanup");
+    assert_eq!(
+        remaining_files, 2,
+        "Incorrect number of files remaining after cleanup"
+    );
 }
