@@ -2,9 +2,9 @@
 
 #[derive(Debug, PartialEq)]
 pub enum SizeParseError {
-    InvalidFormat,
-    InvalidUnit,
-    InvalidNumber,
+    Format,
+    Unit,
+    Number,
 }
 
 /// Parse a human-readable size string into bytes
@@ -27,7 +27,7 @@ pub fn parse_size(size_str: &str) -> Result<u64, SizeParseError> {
     if size_str.chars().all(|c| c.is_ascii_digit()) {
         return size_str
             .parse::<u64>()
-            .map_err(|_| SizeParseError::InvalidNumber);
+            .map_err(|_| SizeParseError::Number);
     }
 
     // Find the split between number and unit
@@ -40,14 +40,14 @@ pub fn parse_size(size_str: &str) -> Result<u64, SizeParseError> {
     }
 
     if num_end == 0 {
-        return Err(SizeParseError::InvalidFormat);
+        return Err(SizeParseError::Format);
     }
 
     // Parse the number part
     let num_str = &size_str[..num_end];
     let number = num_str
         .parse::<f64>()
-        .map_err(|_| SizeParseError::InvalidNumber)?;
+        .map_err(|_| SizeParseError::Number)?;
 
     // Parse the unit part
     let unit = size_str[num_end..].trim().to_lowercase();
@@ -59,7 +59,7 @@ pub fn parse_size(size_str: &str) -> Result<u64, SizeParseError> {
         "m" | "mb" | "mib" => (number * 1024.0 * 1024.0) as u64,
         "g" | "gb" | "gib" => (number * 1024.0 * 1024.0 * 1024.0) as u64,
         "t" | "tb" | "tib" => (number * 1024.0 * 1024.0 * 1024.0 * 1024.0) as u64,
-        _ => return Err(SizeParseError::InvalidUnit),
+        _ => return Err(SizeParseError::Unit),
     };
 
     Ok(bytes)
