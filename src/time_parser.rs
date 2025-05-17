@@ -18,7 +18,7 @@ pub fn parse_time_string(time_str: &str) -> Result<i64, String> {
 
     for c in chars {
         if c.is_ascii_digit() {
-            current_number = current_number * 10 + c.to_digit(10).unwrap() as i64;
+            current_number = current_number * 10 + i64::from(c.to_digit(10).unwrap());
         } else {
             match c {
                 'h' => {
@@ -34,7 +34,7 @@ pub fn parse_time_string(time_str: &str) -> Result<i64, String> {
                     current_number = 0;
                 }
                 _ => {
-                    return Err(format!("Invalid time unit: {}", c));
+                    return Err(format!("Invalid time unit: {c}"));
                 }
             }
         }

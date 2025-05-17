@@ -18,8 +18,7 @@ impl Logger {
             Ok(size) => size,
             Err(e) => {
                 eprintln!(
-                    "Error parsing log rotation size '{}': {:?}",
-                    log_size_str, e
+                    "Error parsing log rotation size '{log_size_str}': {e:?}"
                 );
                 eprintln!("Using default size of 10MB");
                 10 * 1024 * 1024 // Default to 10MB if parsing fails
@@ -317,8 +316,8 @@ mod tests {
         for i in 1..=5 {
             let rotated_path = temp_dir
                 .path()
-                .join(format!("max_test.log.2025051{}_120000", i));
-            fs::write(&rotated_path, format!("rotated content {}", i))
+                .join(format!("max_test.log.2025051{i}_120000"));
+            fs::write(&rotated_path, format!("rotated content {i}"))
                 .expect("Failed to create rotated file");
             // Set modification time to ensure proper ordering
             // Note: This is OS-specific and might not work in all environments
@@ -350,7 +349,7 @@ mod tests {
         // Log enough data to trigger a rotation
         for i in 0..30 {
             logger
-                .log(&format!("Log message {} to trigger rotation", i))
+                .log(&format!("Log message {i} to trigger rotation"))
                 .await;
             // Small delay to ensure logs are processed
             tokio::time::sleep(Duration::from_millis(10)).await;

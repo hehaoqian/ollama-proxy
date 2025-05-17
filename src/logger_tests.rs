@@ -98,9 +98,9 @@ async fn test_max_log_files() {
         "20250101_120400",
     ];
 
-    for ts in timestamps.iter() {
-        let rotated_path = temp_dir.path().join(format!("max_test.log.{}", ts));
-        fs::write(&rotated_path, format!("Rotated content for {}", ts))
+    for ts in &timestamps {
+        let rotated_path = temp_dir.path().join(format!("max_test.log.{ts}"));
+        fs::write(&rotated_path, format!("Rotated content for {ts}"))
             .await
             .unwrap();
     }

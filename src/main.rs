@@ -87,9 +87,9 @@ struct Args {
     #[arg(long, default_value_t = 0, env = "PROXY_OLLAMA_MAX_LOG_FILES")]
     max_log_files: u32,
 
-    /// Minimum keep_alive time for model (default: none)
+    /// Minimum `keep_alive` time for model (default: none)
     /// Supports time formats like "30s", "5m", "1h30m", "3h1m5s", "-1s" (infinite)
-    /// This overrides keep_alive in client requests if they are lower than this value
+    /// This overrides `keep_alive` in client requests if they are lower than this value
     #[arg(long, env = "PROXY_OLLAMA_MIN_KEEP_ALIVE")]
     min_keep_alive: Option<String>,
 }
@@ -149,7 +149,7 @@ impl OllamaConfig {
                     Some(seconds)
                 }
                 Err(e) => {
-                    eprintln!("Warning: Could not parse min_keep_alive time: {}", e);
+                    eprintln!("Warning: Could not parse min_keep_alive time: {e}");
                     None
                 }
             });
@@ -437,13 +437,12 @@ fn is_unload_model_request(json: &serde_json::Value) -> bool {
     }
 
     // If keep_alive is not 0, then this is definitely not an unload request
-    let keep_alive_is_zero = json.get("keep_alive").map(is_zero_value).unwrap_or(false)
+    let keep_alive_is_zero = json.get("keep_alive").is_some_and(is_zero_value)
         || json
             .get("options")
             .and_then(|o| o.as_object())
             .and_then(|o| o.get("keep_alive"))
-            .map(is_zero_value)
-            .unwrap_or(false);
+            .is_some_and(is_zero_value);
 
     if !keep_alive_is_zero {
         return false;
@@ -725,16 +724,13 @@ where
         .expect("Failed to create request");
 
     // Forward the request directly to Ollama
-    match proxy_to_ollama(req, path, ollama_config, client_ip).await {
-        Ok(response) => response,
-        Err(_) => {
-            // Fallback to mock response if Ollama is unavailable
-            ollama_config
-                .logger
-                .log("Failed to get response from Ollama, using fallback response")
-                .await;
-            fallback_generator()
-        }
+    if let Ok(response) = proxy_to_ollama(req, path, ollama_config, client_ip).await { response } else {
+        // Fallback to mock response if Ollama is unavailable
+        ollama_config
+            .logger
+            .log("Failed to get response from Ollama, using fallback response")
+            .await;
+        fallback_generator()
     }
 }
 
@@ -1045,7 +1041,11 @@ async fn run_http_server(
     }
 
     if let Some(ref allowed_ips) = ollama_config.allowed_ips {
-        if !allowed_ips.is_empty() {
+        if allowed_ips.is_empty() {
+            logger
+                .log("WARNING: IP allowlist is empty. All requests will be blocked!")
+                .await;
+        } else {
             logger
                 .log(&format!(
                     "IP address allowlist enabled. Only {} IP addresses are allowed to connect.",
@@ -1059,16 +1059,12 @@ async fn run_http_server(
                         "Allowed IPs: {}",
                         allowed_ips
                             .iter()
-                            .map(|ip| ip.to_string())
+                            .map(std::string::ToString::to_string)
                             .collect::<Vec<_>>()
                             .join(", ")
                     ))
                     .await;
             }
-        } else {
-            logger
-                .log("WARNING: IP allowlist is empty. All requests will be blocked!")
-                .await;
         }
     }
 
@@ -1113,8 +1109,7 @@ async fn run_http_server(
         } else {
             logger
                 .log(&format!(
-                    "Minimum keep_alive time set to {} seconds",
-                    min_seconds
+                    "Minimum keep_alive time set to {min_seconds} seconds"
                 ))
                 .await;
         }
@@ -1183,7 +1178,11 @@ async fn run_https_server(
     }
 
     if let Some(ref allowed_ips) = ollama_config.allowed_ips {
-        if !allowed_ips.is_empty() {
+        if allowed_ips.is_empty() {
+            logger
+                .log("WARNING: IP allowlist is empty. All requests will be blocked!")
+                .await;
+        } else {
             logger
                 .log(&format!(
                     "IP address allowlist enabled. Only {} IP addresses are allowed to connect.",
@@ -1197,16 +1196,12 @@ async fn run_https_server(
                         "Allowed IPs: {}",
                         allowed_ips
                             .iter()
-                            .map(|ip| ip.to_string())
+                            .map(std::string::ToString::to_string)
                             .collect::<Vec<_>>()
                             .join(", ")
                     ))
                     .await;
             }
-        } else {
-            logger
-                .log("WARNING: IP allowlist is empty. All requests will be blocked!")
-                .await;
         }
     }
 
@@ -1231,8 +1226,7 @@ async fn run_https_server(
         } else {
             logger
                 .log(&format!(
-                    "Minimum keep_alive time set to {} seconds",
-                    min_seconds
+                    "Minimum keep_alive time set to {min_seconds} seconds"
                 ))
                 .await;
         }
@@ -1347,18 +1341,16 @@ async fn log_detailed_json(
 ) {
     // Try to parse the body as JSON for prettier logging
     let body_str = String::from_utf8_lossy(body_bytes);
-    let body_json = if !body_bytes.is_empty() {
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&body_str) {
-            value
-        } else {
-            // If not valid JSON, create a JSON string with the content
-            serde_json::json!({ "content": body_str })
-        }
-    } else {
+    let body_json = if body_bytes.is_empty() {
         serde_json::json!({ "content": "<empty>" })
+    } else if let Ok(value) = serde_json::from_str::<serde_json::Value>(&body_str) {
+        value
+    } else {
+        // If not valid JSON, create a JSON string with the content
+        serde_json::json!({ "content": body_str })
     };
 
-    let status_code = status.map(|s| s.as_u16()).unwrap_or(0);
+    let status_code = status.map_or(0, |s| s.as_u16());
 
     // Convert headers to a map of string -> string
     let headers_json = headers.iter().map(|(k, v)| {
@@ -1397,8 +1389,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(addr) => addr,
         Err(e) => {
             eprintln!(
-                "Error parsing host address: {}. Please provide a valid IP address.",
-                e
+                "Error parsing host address: {e}. Please provide a valid IP address."
             );
             return Err(format!("Invalid host address: {}", args.host).into());
         }
