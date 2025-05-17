@@ -521,8 +521,8 @@ async fn apply_min_keep_alive_and_log(
             // Top-level keep_alive
             if let Some(keep_alive) = modified_json.get("keep_alive") {
                 let should_modify = match keep_alive {
-                    serde_json::Value::Number(n) => n.as_i64().map_or(false, |current| current > 0 && current < min_seconds),
-                    serde_json::Value::String(s) => parse_time_string(s).map_or(false, |current| current > 0 && current < min_seconds),
+                    serde_json::Value::Number(n) => n.as_i64().is_some_and(|current| current > 0 && current < min_seconds),
+                    serde_json::Value::String(s) => parse_time_string(s).is_ok_and(|current| current > 0 && current < min_seconds),
                     _ => false,
                 };
                 if should_modify {
@@ -538,8 +538,8 @@ async fn apply_min_keep_alive_and_log(
                 if let Some(obj) = options.as_object_mut() {
                     if let Some(keep_alive) = obj.get("keep_alive") {
                         let should_modify_option = match keep_alive {
-                            serde_json::Value::Number(n) => n.as_i64().map_or(false, |current| current > 0 && current < min_seconds),
-                            serde_json::Value::String(s) => parse_time_string(s).map_or(false, |current| current > 0 && current < min_seconds),
+                            serde_json::Value::Number(n) => n.as_i64().is_some_and(|current| current > 0 && current < min_seconds),
+                            serde_json::Value::String(s) => parse_time_string(s).is_ok_and(|current| current > 0 && current < min_seconds),
                             _ => false,
                         };
                         if should_modify_option {
