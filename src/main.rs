@@ -23,8 +23,10 @@ mod logger;
 #[cfg(test)]
 mod logger_tests;
 mod size_parser;
+mod time_parser;
 
 use logger::Logger;
+use time_parser::parse_time_string;
 
 // A simple type alias for convenience
 type BoxBody = http_body_util::combinators::BoxBody<Bytes, hyper::Error>;
@@ -121,54 +123,6 @@ struct OllamaConfig {
     api_key: Option<String>,
     allowed_ips: Option<Vec<std::net::IpAddr>>,
     min_keep_alive_seconds: Option<i64>, // Store as seconds, negative means infinite
-}
-
-// Parse time string in format like "1s", "1m2s", "3h1m5s", "-1s" (infinite)
-// Returns the time in seconds, negative value means infinite
-fn parse_time_string(time_str: &str) -> Result<i64, String> {
-    if time_str.is_empty() {
-        return Err("Empty time string".to_string());
-    }
-
-    // Handle negative time (infinite)
-    if time_str.starts_with('-') {
-        return Ok(-1);
-    }
-
-    let mut total_seconds = 0i64;
-    let mut current_number = 0i64;
-    let mut chars = time_str.chars().peekable();
-
-    while let Some(c) = chars.next() {
-        if c.is_ascii_digit() {
-            current_number = current_number * 10 + c.to_digit(10).unwrap() as i64;
-        } else {
-            match c {
-                'h' => {
-                    total_seconds += current_number * 3600; // hours to seconds
-                    current_number = 0;
-                }
-                'm' => {
-                    total_seconds += current_number * 60; // minutes to seconds
-                    current_number = 0;
-                }
-                's' => {
-                    total_seconds += current_number; // seconds
-                    current_number = 0;
-                }
-                _ => {
-                    return Err(format!("Invalid time unit: {}", c));
-                }
-            }
-        }
-    }
-
-    // If there's a trailing number without a unit, assume it's seconds
-    if current_number > 0 {
-        total_seconds += current_number;
-    }
-
-    Ok(total_seconds)
 }
 
 impl OllamaConfig {
