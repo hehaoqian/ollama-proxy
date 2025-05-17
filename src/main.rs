@@ -497,6 +497,7 @@ fn create_generate_fallback_response() -> Response<BoxBody> {
 async fn handle_generate_with_model_info(
     req: Request<hyper::body::Incoming>,
     ollama_config: &Arc<OllamaConfig>,
+    path: &str,
     client_ip: &SocketAddr,
 ) -> Response<BoxBody> {
     // Save the headers for potential authentication check before consuming the request
@@ -665,7 +666,7 @@ async fn handle_generate_with_model_info(
 
     // Create a new request with the body we read for Ollama
     let uri = ollama_config
-        .build_uri("/api/generate")
+        .build_uri(path)
         .expect("Failed to build URI for generate endpoint");
 
     let req = Request::builder()
@@ -684,7 +685,7 @@ async fn handle_generate_with_model_info(
         .expect("Failed to create request");
 
     // Forward the request directly to Ollama
-    if let Ok(response) = proxy_to_ollama(req, "/api/generate", ollama_config, client_ip).await {
+    if let Ok(response) = proxy_to_ollama(req, path, ollama_config, client_ip).await {
         response
     } else {
         // Fallback to mock response if Ollama is unavailable
@@ -859,8 +860,8 @@ async fn handle_api_endpoint(
 
     match (method, path_parts.as_slice()) {
         // Generate endpoint - Forward with model info handling
-        (Method::POST, ["api", "generate"]) => {
-            handle_generate_with_model_info(req, ollama_config, client_ip).await
+        (Method::POST, ["api", "generate" | "chat" | "embed" | "embeddings" ])=> {
+            handle_generate_with_model_info(req, ollama_config, path, client_ip).await
         }
 
         // List models endpoint - Specialized handler with fallback
@@ -1294,6 +1295,15 @@ async fn log_api_endpoints(logger: &Logger) {
     logger.log("API endpoints:").await;
     logger
         .log("  POST /api/generate - Generate text from a model")
+        .await;
+    logger
+        .log("  POST /api/chat - Generate the next message in a chat with a provided model")
+        .await;
+    logger
+        .log("  POST /api/embed - Generate embeddings from a model")
+        .await;
+    logger
+        .log("  POST /api/embeddings - Deprecated. Similar to /api/embed")
         .await;
     logger
         .log("  GET  /api/tags     - List available models")
