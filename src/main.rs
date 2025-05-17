@@ -401,14 +401,23 @@ fn handle_unauthorized() -> Response<BoxBody> {
 fn is_unload_model_request(json: &serde_json::Value) -> bool {
     // Per Ollama docs, an empty prompt (or no prompt) with keep_alive: 0 unloads a model
 
+    // Check if keep_alive is 0 as a number or string like "0s", "0m", "0h"
+    fn is_zero_value(value: &serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::Number(n) if n.as_i64() == Some(0) => true,
+            serde_json::Value::String(s) => s == "0" || s == "0s" || s == "0m" || s == "0h",
+            _ => false,
+        }
+    }
+
     // If keep_alive is not 0, then this is definitely not an unload request
-    let keep_alive_is_zero = json.get("keep_alive").and_then(serde_json::Value::as_i64) == Some(0)
-        || (json
+    let keep_alive_is_zero = json.get("keep_alive").map(is_zero_value).unwrap_or(false)
+        || json
             .get("options")
             .and_then(|o| o.as_object())
             .and_then(|o| o.get("keep_alive"))
-            .and_then(serde_json::Value::as_i64)
-            == Some(0));
+            .map(is_zero_value)
+            .unwrap_or(false);
 
     if !keep_alive_is_zero {
         return false;
