@@ -72,6 +72,11 @@ struct Args {
     /// Supports human-readable formats like "10MB", "1GB", "500KB", etc.
     #[arg(long, default_value = "10MB")]
     log_rotate_size: String,
+
+    /// Maximum number of rotated log files to keep (default: 0, unlimited)
+    /// When this limit is reached, the oldest log files will be deleted
+    #[arg(long, default_value_t = 0)]
+    max_log_files: u32,
 }
 
 // Logger that can write to both console and file
@@ -80,7 +85,7 @@ struct Logger {
 }
 
 impl Logger {
-    async fn new(log_path: Option<PathBuf>, log_size_str: String) -> Self {
+    async fn new(log_path: Option<PathBuf>, log_size_str: String, max_log_files: u32) -> Self {
         // Parse the human-readable size format
         let max_size_bytes = match parse_size(&log_size_str) {
             Ok(size) => size,
@@ -99,6 +104,7 @@ impl Logger {
 
         // Clone log_path for use in the spawned task
         let task_log_path = log_path.clone();
+        let max_files = max_log_files; // Clone the max_log_files for the task
 
         // Open log file if path provided
         let log_file = if let Some(path) = log_path.clone() {
@@ -159,6 +165,14 @@ impl Logger {
                                 eprintln!("Error rotating log file: {e}");
                             } else {
                                 println!("Rotated log file to: {}", rotated_path.display());
+
+                                // Clean up old log files if max_files is set
+                                if max_files > 0 {
+                                    // Try to clean up old log files
+                                    if let Err(e) = cleanup_old_log_files(path, max_files).await {
+                                        eprintln!("Error cleaning up old log files: {e}");
+                                    }
+                                }
                             }
 
                             // Create a new log file
@@ -207,6 +221,64 @@ impl Logger {
             println!("{message}");
         }
     }
+}
+
+// Function to clean up old log files when max limit is reached
+async fn cleanup_old_log_files(
+    log_path: &PathBuf,
+    max_files: u32,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // First, get the base filename to match rotated files
+    let base_name = log_path
+        .file_name()
+        .ok_or("Invalid log path")?
+        .to_string_lossy()
+        .to_string();
+
+    // Get the directory of the log file
+    let dir_path = log_path.parent().unwrap_or(std::path::Path::new("."));
+
+    // Read the directory entries
+    let mut entries = Vec::new();
+    let mut dir = tokio::fs::read_dir(dir_path).await?;
+
+    // Collect all rotated log files
+    while let Some(entry) = dir.next_entry().await? {
+        let path = entry.path();
+        if let Some(filename) = path.file_name() {
+            let filename_str = filename.to_string_lossy();
+            // Check if this is a rotated log file for our base log file
+            if filename_str.starts_with(&base_name) && filename_str != base_name {
+                entries.push(path);
+            }
+        }
+    }
+
+    // If we have more files than the max allowed, delete the oldest ones
+    if entries.len() > max_files as usize {
+        // Sort files by modification time (oldest first)
+        entries.sort_by(|a, b| {
+            let a_meta = std::fs::metadata(a).ok();
+            let b_meta = std::fs::metadata(b).ok();
+
+            match (a_meta, b_meta) {
+                (Some(a_meta), Some(b_meta)) => a_meta.modified().unwrap_or_else(|_| std::time::SystemTime::UNIX_EPOCH)
+                    .cmp(&b_meta.modified().unwrap_or_else(|_| std::time::SystemTime::UNIX_EPOCH)),
+                _ => std::cmp::Ordering::Equal,
+            }
+        });
+
+        // Calculate how many files to delete
+        let files_to_delete = entries.len() - max_files as usize;
+
+        // Delete the oldest files
+        for path in entries.iter().take(files_to_delete) {
+            println!("Deleting old log file: {}", path.display());
+            tokio::fs::remove_file(path).await?;
+        }
+    }
+
+    Ok(())
 }
 
 // Function to create a boxed response body from a string
@@ -1117,13 +1189,21 @@ async fn run_http_server(
     }
 
     if let Some(ref log_path) = args.log_file {
-        logger
-            .log(&format!(
-                "Logging to file: {} (rotation at {})",
+        let rotation_msg = if args.max_log_files > 0 {
+            format!(
+                "Logging to file: {} (rotation at {}, keeping max {} rotated files)",
+                log_path.display(),
+                args.log_rotate_size,
+                args.max_log_files
+            )
+        } else {
+            format!(
+                "Logging to file: {} (rotation at {}, no limit on rotated files)",
                 log_path.display(),
                 args.log_rotate_size
-            ))
-            .await;
+            )
+        };
+        logger.log(&rotation_msg).await;
     } else {
         logger.log("Logging to console only (no log file)").await;
     }
@@ -1386,7 +1466,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr = SocketAddr::from((ip, args.port));
 
     // Create logger
-    let logger = Arc::new(Logger::new(args.log_file.clone(), args.log_rotate_size.clone()).await);
+    let logger = Arc::new(Logger::new(args.log_file.clone(), args.log_rotate_size.clone(), args.max_log_files).await);
 
     // Check HTTPS configuration
     if args.https {
