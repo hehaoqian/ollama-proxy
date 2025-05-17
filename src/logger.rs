@@ -326,6 +326,7 @@ mod tests {
                 let now = std::time::SystemTime::now();
                 let seconds =
                     now.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() - (5 - i) * 3600;
+                #[allow(clippy::cast_possible_wrap)]
                 let times = filetime::FileTime::from_unix_time(seconds as i64, 0);
                 filetime::set_file_mtime(&rotated_path, times).expect("Failed to set file time");
             }
