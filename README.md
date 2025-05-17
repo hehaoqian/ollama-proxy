@@ -47,7 +47,7 @@ cargo run -- --https --cert-file ./certs/server.crt --key-file ./certs/server.ke
 To make the server publicly accessible on all network interfaces:
 
 ```bash
-cargo run -- --https --cert-file ./certs/server.crt --key-file ./certs/server.key --listen-public
+cargo run -- --https --cert-file ./certs/server.crt --key-file ./certs/server.key --host 0.0.0.0
 ```
 
 ### Using Environment Variables
@@ -83,10 +83,12 @@ cargo run
 | `--cert-file` | TLS certificate file path (required when HTTPS is enabled) |
 | `--key-file` | TLS private key file path (required when HTTPS is enabled) |
 | `--host` | Host address to listen on (default: 127.0.0.1, use 0.0.0.0 to listen on all interfaces) |
+| `--log-rotate-size` | Maximum log file size before rotation (default: 10MB) |
+| `--max-log-files` | Maximum number of rotated log files to keep (default: 0, unlimited) |
 
 ## API Endpoints
 
-Documentation for all API endpoints is available at the root URL (e.g., http://localhost:3001/ or https://localhost:3001/).
+Documentation for all API endpoints is available at the root URL (e.g., `http://localhost:3001/` or `https://localhost:3001/`).
 
 ## Testing HTTPS
 
@@ -97,6 +99,7 @@ To quickly test the HTTPS functionality, use the provided demo script:
 ```
 
 This script will:
+
 1. Generate self-signed certificates if they don't exist
 2. Build the server
 3. Start the server with HTTPS enabled
