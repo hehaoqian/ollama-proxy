@@ -492,6 +492,88 @@ fn create_generate_fallback_response() -> Response<BoxBody> {
     json_response(&response, StatusCode::OK)
 }
 
+// Helper: Check if unload request is authenticated
+fn is_unload_request_authenticated(headers: &hyper::HeaderMap<hyper::header::HeaderValue>, ollama_config: &OllamaConfig) -> bool {
+    if let Some(ref api_key) = ollama_config.api_key {
+        if let Some(auth_header) = headers.get("Authorization") {
+            if let Ok(auth_str) = auth_header.to_str() {
+                if let Some(key) = auth_str.strip_prefix("Bearer ") {
+                    return key == api_key;
+                }
+            }
+        }
+        false
+    } else {
+        true
+    }
+}
+
+// Helper: Apply min_keep_alive to JSON if needed
+async fn apply_min_keep_alive_and_log(
+    json: &serde_json::Value,
+    ollama_config: &Arc<OllamaConfig>,
+    client_ip: &SocketAddr,
+) -> Option<Bytes> {
+    if let Some(min_seconds) = ollama_config.min_keep_alive_seconds {
+        if min_seconds > 0 {
+            let mut modified_json = json.clone();
+            let mut was_modified = false;
+            // Top-level keep_alive
+            if let Some(keep_alive) = modified_json.get("keep_alive") {
+                let should_modify = match keep_alive {
+                    serde_json::Value::Number(n) => n.as_i64().map_or(false, |current| current > 0 && current < min_seconds),
+                    serde_json::Value::String(s) => parse_time_string(s).map_or(false, |current| current > 0 && current < min_seconds),
+                    _ => false,
+                };
+                if should_modify {
+                    if let Some(obj) = modified_json.as_object_mut() {
+                        obj.insert("keep_alive".to_string(), serde_json::Value::Number(min_seconds.into()));
+                        was_modified = true;
+                        ollama_config.logger.log(&format!("Applied minimum keep_alive of {min_seconds}s to request from {client_ip}")).await;
+                    }
+                }
+            }
+            // options.keep_alive
+            if let Some(options) = modified_json.get_mut("options") {
+                if let Some(obj) = options.as_object_mut() {
+                    if let Some(keep_alive) = obj.get("keep_alive") {
+                        let should_modify_option = match keep_alive {
+                            serde_json::Value::Number(n) => n.as_i64().map_or(false, |current| current > 0 && current < min_seconds),
+                            serde_json::Value::String(s) => parse_time_string(s).map_or(false, |current| current > 0 && current < min_seconds),
+                            _ => false,
+                        };
+                        if should_modify_option {
+                            obj.insert("keep_alive".to_string(), serde_json::Value::Number(min_seconds.into()));
+                            was_modified = true;
+                            ollama_config.logger.log(&format!("Applied minimum keep_alive of {min_seconds}s to options in request from {client_ip}")).await;
+                        }
+                    }
+                }
+            }
+            if was_modified {
+                if let Ok(new_body) = serde_json::to_vec(&modified_json) {
+                    return Some(Bytes::from(new_body));
+                }
+            }
+        }
+    }
+    None
+}
+
+// Helper: Build request for Ollama
+fn build_ollama_generate_request(
+    uri: hyper::Uri,
+    body: Bytes,
+) -> Request<BoxBody> {
+    Request::builder()
+        .uri(uri)
+        .method(Method::POST)
+        .body(Full::new(body)
+            .map_err(|never| match never {})
+            .boxed())
+        .expect("Failed to create request")
+}
+
 // Handle the special case of a generate request with model unloading instructions
 async fn handle_generate_with_model_info(
     req: Request<hyper::body::Incoming>,
@@ -499,10 +581,7 @@ async fn handle_generate_with_model_info(
     path: &str,
     client_ip: &SocketAddr,
 ) -> Response<BoxBody> {
-    // Save the headers for potential authentication check before consuming the request
     let headers = req.headers().clone();
-
-    // Try to examine the body to log info without consuming it
     let (_parts, body) = req.into_parts();
     let maybe_body_bytes = match body.collect().await {
         Ok(collected) => Some(collected.to_bytes()),
@@ -512,188 +591,39 @@ async fn handle_generate_with_model_info(
             None
         }
     };
-
-    // If we have the body bytes, check for unload request and authentication
     let mut modified_body = None;
     if let Some(ref body_bytes) = maybe_body_bytes {
         if let Ok(json) = serde_json::from_slice::<serde_json::Value>(body_bytes) {
-            // Check if this is an unload request
             if is_unload_model_request(&json) {
-                // For unload requests, we need to check authentication using the API key
-                // If no API key is configured, allow all requests
-                let is_auth = if let Some(ref api_key) = ollama_config.api_key {
-                    // Check for Authorization header
-                    if let Some(auth_header) = headers.get("Authorization") {
-                        if let Ok(auth_str) = auth_header.to_str() {
-                            // Format expected is "Bearer <api_key>"
-                            if let Some(key) = auth_str.strip_prefix("Bearer ") {
-                                key == api_key
-                            } else {
-                                false
-                            }
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    }
-                } else {
-                    true // No API key required
-                };
-
-                // Unload requests require authentication
+                let is_auth = is_unload_request_authenticated(&headers, ollama_config);
                 if !is_auth {
-                    ollama_config
-                        .logger
-                        .log(&format!(
-                            "Unauthorized attempt to unload model from {client_ip}"
-                        ))
-                        .await;
+                    ollama_config.logger.log(&format!("Unauthorized attempt to unload model from {client_ip}")).await;
                     return handle_unauthorized();
                 }
-
-                // Log that we're unloading a model (authenticated)
                 if let Some(model) = json.get("model").and_then(|m| m.as_str()) {
-                    ollama_config
-                        .logger
-                        .log(&format!(
-                            "Unloading model from memory (authenticated) from {client_ip}: {model}"
-                        ))
-                        .await;
+                    ollama_config.logger.log(&format!("Unloading model from memory (authenticated) from {client_ip}: {model}")).await;
                 }
             } else {
-                // Normal generate request, just log it
                 log_model_info(&json, &ollama_config.logger, client_ip).await;
-
-                // If min_keep_alive is set and this is not an unload request, potentially modify keep_alive
-                if let Some(min_seconds) = ollama_config.min_keep_alive_seconds {
-                    // Only apply if min_seconds is positive (not infinite)
-                    if min_seconds > 0 {
-                        let mut modified_json = json.clone();
-                        let mut was_modified = false;
-
-                        // Apply min_keep_alive to top-level keep_alive
-                        if let Some(keep_alive) = modified_json.get("keep_alive") {
-                            let should_modify = match keep_alive {
-                                serde_json::Value::Number(n) => {
-                                    // Only modify if keep_alive is not 0 (would be unload) and is less than min_seconds
-                                    if let Some(current) = n.as_i64() {
-                                        current > 0 && current < min_seconds
-                                    } else {
-                                        false
-                                    }
-                                }
-                                serde_json::Value::String(s) => {
-                                    // Try to parse as time string
-                                    if let Ok(current) = parse_time_string(s) {
-                                        current > 0 && current < min_seconds
-                                    } else {
-                                        false
-                                    }
-                                }
-                                _ => false,
-                            };
-
-                            if should_modify {
-                                // Modify the JSON with the minimum keep_alive value
-                                if let Some(obj) = modified_json.as_object_mut() {
-                                    obj.insert(
-                                        "keep_alive".to_string(),
-                                        serde_json::Value::Number(min_seconds.into()),
-                                    );
-                                    was_modified = true;
-
-                                    ollama_config.logger
-                                        .log(&format!(
-                                            "Applied minimum keep_alive of {min_seconds}s to request from {client_ip}"
-                                        ))
-                                        .await;
-                                }
-                            }
-                        }
-
-                        // Also check options.keep_alive
-                        if let Some(options) = modified_json.get_mut("options") {
-                            if let Some(obj) = options.as_object_mut() {
-                                if let Some(keep_alive) = obj.get("keep_alive") {
-                                    let should_modify_option = match keep_alive {
-                                        serde_json::Value::Number(n) => {
-                                            if let Some(current) = n.as_i64() {
-                                                current > 0 && current < min_seconds
-                                            } else {
-                                                false
-                                            }
-                                        }
-                                        serde_json::Value::String(s) => {
-                                            if let Ok(current) = parse_time_string(s) {
-                                                current > 0 && current < min_seconds
-                                            } else {
-                                                false
-                                            }
-                                        }
-                                        _ => false,
-                                    };
-
-                                    if should_modify_option {
-                                        obj.insert(
-                                            "keep_alive".to_string(),
-                                            serde_json::Value::Number(min_seconds.into()),
-                                        );
-                                        was_modified = true;
-
-                                        ollama_config.logger
-                                            .log(&format!(
-                                                "Applied minimum keep_alive of {min_seconds}s to options in request from {client_ip}"
-                                            ))
-                                            .await;
-                                    }
-                                }
-                            }
-                        }
-
-                        // If we modified the JSON, serialize it to a new body
-                        if was_modified {
-                            if let Ok(new_body) = serde_json::to_vec(&modified_json) {
-                                modified_body = Some(Bytes::from(new_body));
-                            }
-                        }
-                    }
-                }
+                modified_body = apply_min_keep_alive_and_log(&json, ollama_config, client_ip).await;
             }
         }
     }
-
-    // Create a new request with the body we read for Ollama
-    let uri = ollama_config
-        .build_uri(path)
-        .expect("Failed to build URI for generate endpoint");
-
-    let req = Request::builder()
-        .uri(uri)
-        .method(Method::POST)
-        .body(
-            Full::new(if let Some(modified) = modified_body {
-                modified
-            } else if let Some(bytes) = maybe_body_bytes {
-                bytes
-            } else {
-                Bytes::new()
-            })
-            .boxed(),
-        )
-        .expect("Failed to create request");
-
-    // Forward the request directly to Ollama
+    let uri = ollama_config.build_uri(path).expect("Failed to build URI for generate endpoint");
+    let req = build_ollama_generate_request(
+        uri,
+        if let Some(modified) = modified_body {
+            modified
+        } else if let Some(bytes) = maybe_body_bytes {
+            bytes
+        } else {
+            Bytes::new()
+        },
+    );
     if let Ok(response) = proxy_to_ollama(req, path, ollama_config, client_ip).await {
         response
     } else {
-        // Fallback to mock response if Ollama is unavailable
-        ollama_config
-            .logger
-            .log(&format!(
-                "Failed to get response from Ollama for {client_ip}, using mock response"
-            ))
-            .await;
+        ollama_config.logger.log(&format!("Failed to get response from Ollama for {client_ip}, using mock response")).await;
         create_generate_fallback_response()
     }
 }
