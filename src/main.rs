@@ -1334,6 +1334,7 @@ async fn log_api_endpoints(logger: &Logger) {
 }
 
 // Helper function to create detailed JSON logs for requests and responses
+#[allow(clippy::too_many_arguments)]
 async fn log_detailed_json(
     logger: &Logger,
     direction: &str,
