@@ -54,13 +54,21 @@ pub fn parse_size(size_str: &str) -> Result<u64, SizeParseError> {
 
     // Convert to bytes based on the unit
     let bytes = match unit.as_str() {
-        "b" | "byte" | "bytes" => number as u64,
-        "k" | "kb" | "kib" => (number * 1024.0) as u64,
-        "m" | "mb" | "mib" => (number * 1024.0 * 1024.0) as u64,
-        "g" | "gb" | "gib" => (number * 1024.0 * 1024.0 * 1024.0) as u64,
-        "t" | "tb" | "tib" => (number * 1024.0 * 1024.0 * 1024.0 * 1024.0) as u64,
+        "b" | "byte" | "bytes" => number,
+        "k" | "kb" | "kib" => number * 1024.0,
+        "m" | "mb" | "mib" => number * 1024.0 * 1024.0,
+        "g" | "gb" | "gib" => number * 1024.0 * 1024.0 * 1024.0,
+        "t" | "tb" | "tib" => number * 1024.0 * 1024.0 * 1024.0 * 1024.0,
         _ => return Err(SizeParseError::Unit),
     };
+
+    if bytes < 0.0 {
+        return Err(SizeParseError::Number);
+    }
+
+    #[allow(clippy::cast_sign_loss)]
+    #[allow(clippy::cast_possible_truncation)]
+    let bytes: u64 = bytes as u64;
 
     Ok(bytes)
 }
