@@ -187,7 +187,10 @@ fn copy_headers(
     target: &mut hyper::HeaderMap<hyper::header::HeaderValue>,
 ) {
     for (name, value) in source {
-        target.insert(name.clone(), value.clone());
+        // Skip Authorization header when forwarding requests to Ollama
+        if name != hyper::header::AUTHORIZATION {
+            target.insert(name.clone(), value.clone());
+        }
     }
 }
 
