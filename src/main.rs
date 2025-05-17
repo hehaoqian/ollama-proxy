@@ -254,6 +254,7 @@ where
                 None,
                 &bytes,
                 client_ip,
+                &parts.headers,
             )
             .await;
 
@@ -320,6 +321,7 @@ where
                         Some(status),
                         &bytes,
                         client_ip,
+                        &parts.headers,
                     )
                     .await;
 
@@ -1330,6 +1332,7 @@ async fn log_detailed_json(
     status: Option<StatusCode>,
     body_bytes: &Bytes,
     client_ip: &SocketAddr,
+    headers: &hyper::HeaderMap<hyper::header::HeaderValue>,
 ) {
     // Try to parse the body as JSON for prettier logging
     let body_str = String::from_utf8_lossy(body_bytes);
@@ -1346,6 +1349,13 @@ async fn log_detailed_json(
 
     let status_code = status.map(|s| s.as_u16()).unwrap_or(0);
 
+    // Convert headers to a map of string -> string
+    let headers_json = headers.iter().map(|(k, v)| {
+        let key = k.as_str().to_string();
+        let value = v.to_str().unwrap_or("").to_string();
+        (key, value)
+    }).collect::<std::collections::BTreeMap<_, _>>();
+
     // Create the detailed log entry
     let log_entry = serde_json::json!({
         "timestamp": Local::now().to_rfc3339(),
@@ -1354,6 +1364,7 @@ async fn log_detailed_json(
         "method": method.to_string(),
         "path": path,
         "status": status_code,
+        "headers": headers_json,
         "body": body_json
     });
 
