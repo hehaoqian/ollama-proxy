@@ -34,7 +34,7 @@ type BoxBody = http_body_util::combinators::BoxBody<Bytes, hyper::Error>;
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Port to listen on
-    #[arg(short, long, default_value_t = 3001, env = "PROXY_OLLAMA_PORT")]
+    #[arg(short, long, default_value_t = 11434, env = "PROXY_OLLAMA_PORT")]
     port: u16,
 
     /// Ollama server URL
