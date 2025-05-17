@@ -757,65 +757,6 @@ async fn handle_generate_with_model_info(
     }
 }
 
-// Handle the documentation endpoint
-fn handle_docs_endpoint() -> Response<BoxBody> {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header("Content-Type", "text/html")
-        .body(full(
-            "<html><body><h1>API Documentation</h1>
-            <p>This server implements an Ollama-like API, forwarding requests to an Ollama server</p>
-            <h2>Ollama Native Endpoints:</h2>
-            <ul>
-                <li><code>POST /api/generate</code> - Generate text from a model</li>
-                <li><code>GET /api/tags</code> - List available models</li>
-                <li><code>POST /api/create</code> - Create a new model (requires authentication)</li>
-                <li><code>POST /api/copy</code> - Copy a model (requires authentication)</li>
-                <li><code>DELETE /api/delete</code> - Delete a model (requires authentication)</li>
-                <li><code>POST /api/pull</code> - Pull a model (requires authentication)</li>
-                <li><code>POST /api/push</code> - Push a model (requires authentication)</li>
-            </ul>
-            <h2>OpenAI-Compatible Endpoints:</h2>
-            <ul>
-                <li><code>POST /v1/chat/completions</code> - Chat with a model (OpenAI compatible)</li>
-                <li><code>POST /v1/completions</code> - Generate text (OpenAI compatible)</li>
-                <li><code>POST /v1/embeddings</code> - Generate embeddings (OpenAI compatible)</li>
-                <li><code>GET /v1/models</code> - List available models (OpenAI compatible)</li>
-                <li><code>GET /v1/models/{model}</code> - Get model info (OpenAI compatible)</li>
-            </ul>
-            <h2>Special Operations:</h2>
-            <ul>
-                <li><strong>Unload a model:</strong> To unload a model from memory, send a request to <code>POST /api/generate</code> with an empty prompt and <code>keep_alive: 0</code> in the options. Example:
-                <pre>{
-  \"model\": \"MODEL_NAME\",
-  \"prompt\": \"\",
-  \"options\": {
-    \"keep_alive\": 0
-  }
-}</pre>
-                </li>
-            </ul>
-            <h2>Authentication:</h2>
-            <p>For model management endpoints (create, copy, delete, pull, push), an API key is required.
-            Pass the API key in the Authorization header as:<br/>
-            <code>Authorization: Bearer YOUR_API_KEY</code></p>
-            <h2>IP Address Allowlist:</h2>
-            <p>The server can be configured with an IP address allowlist to restrict access to specific IP addresses.
-            This is configured via the command-line argument <code>--allowed-ips</code> when starting the server.
-            If this allowlist is enabled, requests from IP addresses not in the list will be rejected with a 403 Forbidden response.</p>
-            <h2>HTTPS Support:</h2>
-            <p>The server can be started in HTTPS mode to support encrypted connections. Use the following command-line options:</p>
-            <ul>
-                <li><code>--https</code> - Enable HTTPS mode</li>
-                <li><code>--cert-file PATH</code> - Path to the SSL certificate file</li>
-                <li><code>--key-file PATH</code> - Path to the SSL private key file</li>
-                <li><code>--listen-public</code> - Listen on all network interfaces (default is localhost only)</li>
-            </ul>
-            </body></html>"
-        ))
-        .unwrap()
-}
-
 // Generic handler for Ollama API endpoints with fallback responses
 async fn handle_ollama_endpoint_with_fallback<F>(
     method: Method,
