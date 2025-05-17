@@ -64,6 +64,10 @@ struct Args {
     /// Listen on all network interfaces instead of just localhost
     #[arg(long)]
     listen_public: bool,
+
+    /// Maximum log file size in MB before rotation (default: 10MB)
+    #[arg(long, default_value_t = 10)]
+    log_rotate_size: u64,
 }
 
 // Logger that can write to both console and file
@@ -72,16 +76,22 @@ struct Logger {
 }
 
 impl Logger {
-    async fn new(log_path: Option<PathBuf>) -> Self {
+    async fn new(log_path: Option<PathBuf>, max_size_mb: u64) -> Self {
+        // Convert MB to bytes
+        let max_size_bytes = max_size_mb * 1024 * 1024;
+
         // Create a channel for logging messages
         let (log_sender, mut log_receiver) = mpsc::channel::<String>(100);
 
+        // Clone log_path for use in the spawned task
+        let task_log_path = log_path.clone();
+
         // Open log file if path provided
-        let log_file = if let Some(path) = log_path {
+        let log_file = if let Some(path) = log_path.clone() {
             match tokio::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open(path)
+                .open(&path)
                 .await
             {
                 Ok(file) => Some(file),
@@ -97,25 +107,83 @@ impl Logger {
         // Spawn a background task to handle log messages
         tokio::spawn(async move {
             let mut file = log_file;
+            let mut current_size: u64 = if let Some(ref f) = file {
+                match f.metadata().await {
+                    Ok(metadata) => metadata.len(),
+                    Err(_) => 0,
+                }
+            } else {
+                0
+            };
 
             while let Some(message) = log_receiver.recv().await {
                 // Always print to console
                 println!("{message}");
 
                 // Also log to file if configured
-                if let Some(ref mut f) = file {
+                if file.is_some() {
                     let message_with_newline = format!("{message}\n");
-                    // Ignore error if we can't write to the file
-                    if let Err(e) = f.write_all(message_with_newline.as_bytes()).await {
-                        eprintln!("Error writing to log file: {e}");
+                    let message_bytes = message_with_newline.as_bytes();
+
+                    // Check if we need to rotate the log file
+                    if max_size_bytes > 0
+                        && current_size + message_bytes.len() as u64 > max_size_bytes
+                    {
+                        if let Some(ref path) = task_log_path.clone() {
+                            drop(file);
+
+                            // Generate timestamp for the rotated log filename
+                            let timestamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
+                            let rotated_path = path.with_file_name(format!(
+                                "{}.{}",
+                                path.file_name().unwrap().to_string_lossy(),
+                                timestamp
+                            ));
+
+                            // Rename the current log file to the rotated filename
+                            if let Err(e) = tokio::fs::rename(path, &rotated_path).await {
+                                eprintln!("Error rotating log file: {e}");
+                            } else {
+                                println!("Rotated log file to: {}", rotated_path.display());
+                            }
+
+                            // Create a new log file
+                            match tokio::fs::OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open(path)
+                                .await
+                            {
+                                Ok(new_file) => {
+                                    file = Some(new_file);
+                                    current_size = 0;
+                                }
+                                Err(e) => {
+                                    eprintln!("Error creating new log file after rotation: {e}");
+                                    file = None;
+                                }
+                            }
+                        }
                     }
-                    // Try to flush, but ignore errors
-                    let _ = f.flush().await;
+
+                    // Write to the log file (either existing or newly rotated)
+                    if let Some(ref mut f) = file {
+                        // Ignore error if we can't write to the file
+                        if let Err(e) = f.write_all(message_bytes).await {
+                            eprintln!("Error writing to log file: {e}");
+                        } else {
+                            current_size += message_bytes.len() as u64;
+                        }
+                        // Try to flush, but ignore errors
+                        let _ = f.flush().await;
+                    }
                 }
             }
         });
 
-        Self { log_sender }
+        Self {
+            log_sender,
+        }
     }
 
     async fn log(&self, message: &str) {
@@ -1036,6 +1104,18 @@ async fn run_http_server(
         }
     }
 
+    if let Some(ref log_path) = args.log_file {
+        logger
+            .log(&format!(
+                "Logging to file: {} (rotation at {}MB)",
+                log_path.display(),
+                args.log_rotate_size
+            ))
+            .await;
+    } else {
+        logger.log("Logging to console only (no log file)").await;
+    }
+
     // Create a TCP listener
     let listener = TcpListener::bind(addr).await?;
     logger
@@ -1294,7 +1374,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr = SocketAddr::from((ip, args.port));
 
     // Create logger
-    let logger = Arc::new(Logger::new(args.log_file.clone()).await);
+    let logger = Arc::new(Logger::new(args.log_file.clone(), args.log_rotate_size).await);
 
     // Check HTTPS configuration
     if args.https {
