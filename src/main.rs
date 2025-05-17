@@ -71,9 +71,9 @@ struct Args {
     #[arg(long, env = "PROXY_OLLAMA_KEY_FILE")]
     key_file: Option<PathBuf>,
 
-    /// Listen on all network interfaces instead of just localhost
-    #[arg(long, env = "PROXY_OLLAMA_LISTEN_PUBLIC")]
-    listen_public: bool,
+    /// Host address to listen on (default: 127.0.0.1)
+    #[arg(long, default_value = "127.0.0.1", env = "PROXY_OLLAMA_HOST")]
+    host: String,
 
     /// Maximum log file size before rotation (default: 10MB)
     /// Supports human-readable formats like "10MB", "1GB", "500KB", etc.
@@ -1201,15 +1201,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse command-line arguments
     let args = Args::parse();
 
-    // Determine the IP to bind to
-    let ip = if args.listen_public {
-        [0, 0, 0, 0] // Listen on all interfaces
-    } else {
-        [127, 0, 0, 1] // Listen only on localhost
+    // Parse the host address into an IP address
+    let ip = match args.host.parse::<std::net::IpAddr>() {
+        Ok(addr) => addr,
+        Err(e) => {
+            eprintln!(
+                "Error parsing host address: {}. Please provide a valid IP address.",
+                e
+            );
+            return Err(format!("Invalid host address: {}", args.host).into());
+        }
     };
 
     // Set up the server address
-    let addr = SocketAddr::from((ip, args.port));
+    let addr = SocketAddr::new(ip, args.port);
 
     // Create logger
     let logger = Arc::new(
@@ -1266,7 +1271,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         // Run the server in HTTP mode
         logger.log("HTTP mode enabled (no encryption)").await;
-        if args.listen_public {
+        if args.host == "0.0.0.0" {
             logger
                 .log("WARNING: Server is listening on all network interfaces without encryption")
                 .await;

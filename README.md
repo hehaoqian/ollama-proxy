@@ -62,7 +62,7 @@ export PROXY_OLLAMA_ALLOWED_IPS="127.0.0.1,192.168.1.5"
 export PROXY_OLLAMA_HTTPS=true
 export PROXY_OLLAMA_CERT_FILE="./certs/server.crt"
 export PROXY_OLLAMA_KEY_FILE="./certs/server.key"
-export PROXY_OLLAMA_LISTEN_PUBLIC=true
+export PROXY_OLLAMA_HOST="0.0.0.0"
 export PROXY_OLLAMA_LOG_FILE="./proxy.log"
 export PROXY_OLLAMA_LOG_ROTATE_SIZE="10MB"
 export PROXY_OLLAMA_MAX_LOG_FILES=5
@@ -82,7 +82,7 @@ cargo run
 | `--https` | Enable HTTPS mode |
 | `--cert-file` | TLS certificate file path (required when HTTPS is enabled) |
 | `--key-file` | TLS private key file path (required when HTTPS is enabled) |
-| `--listen-public` | Listen on all network interfaces instead of just localhost |
+| `--host` | Host address to listen on (default: 127.0.0.1, use 0.0.0.0 to listen on all interfaces) |
 
 ## API Endpoints
 
