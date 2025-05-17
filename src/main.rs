@@ -184,7 +184,12 @@ impl OllamaConfig {
 
     // Build a full URI for an Ollama API endpoint
     fn build_uri(&self, path: &str) -> Result<hyper::Uri, hyper::http::uri::InvalidUri> {
-        let uri_str = format!("{}{}", self.base_url, path);
+        // Handle the root path specially to avoid double slashes
+        let uri_str = if path == "/" && self.base_url.ends_with('/') {
+            self.base_url.clone()
+        } else {
+            format!("{}{}", self.base_url, path)
+        };
         uri_str.parse::<hyper::Uri>()
     }
 
