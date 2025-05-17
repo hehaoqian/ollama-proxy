@@ -940,13 +940,11 @@ fn load_tls_config(
     Ok(config)
 }
 
-// Run HTTP server implementation
-async fn run_http_server(
-    addr: SocketAddr,
-    args: Args,
-    logger: Arc<Logger>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    // Create Ollama configuration
+// Helper: Initialize and configure Ollama server
+async fn setup_ollama_server(
+    args: &Args,
+    logger: &Arc<Logger>,
+) -> Result<Arc<OllamaConfig>, Box<dyn std::error::Error>> {
     let ollama_config = OllamaConfig::new(
         args.ollama_url.clone(),
         logger.clone(),
@@ -955,6 +953,7 @@ async fn run_http_server(
         args.min_keep_alive.clone(),
     );
 
+    // Log server configuration
     logger
         .log(&format!(
             "Forwarding requests to Ollama server at: {}",
@@ -963,18 +962,15 @@ async fn run_http_server(
         .await;
 
     if args.api_key.is_some() {
-        logger
-            .log("API authentication enabled for model management endpoints")
-            .await;
+        logger.log("API authentication enabled for model management endpoints").await;
     } else {
         logger.log("WARNING: API authentication not configured. All endpoints are publicly accessible!").await;
     }
 
+    // Log allowlist information
     if let Some(ref allowed_ips) = ollama_config.allowed_ips {
         if allowed_ips.is_empty() {
-            logger
-                .log("WARNING: IP allowlist is empty. All requests will be blocked!")
-                .await;
+            logger.log("WARNING: IP allowlist is empty. All requests will be blocked!").await;
         } else {
             logger
                 .log(&format!(
@@ -982,7 +978,6 @@ async fn run_http_server(
                     allowed_ips.len()
                 ))
                 .await;
-            // Log the list of allowed IPs if it's not too large
             if allowed_ips.len() <= 10 {
                 logger
                     .log(&format!(
@@ -998,6 +993,7 @@ async fn run_http_server(
         }
     }
 
+    // Log log file information
     if let Some(ref log_path) = args.log_file {
         let rotation_msg = if args.max_log_files > 0 {
             format!(
@@ -1018,10 +1014,19 @@ async fn run_http_server(
         logger.log("Logging to console only (no log file)").await;
     }
 
-    // Create a TCP listener
+    Ok(Arc::new(ollama_config))
+}
+
+// Helper: Setup TCP listener and log server startup
+async fn setup_server_listener(
+    addr: SocketAddr,
+    protocol: &str,
+    ollama_config: &Arc<OllamaConfig>,
+    logger: &Arc<Logger>,
+) -> Result<TcpListener, Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(addr).await?;
     logger
-        .log(&format!("REST API server listening on http://{addr}"))
+        .log(&format!("REST API server listening on {protocol}://{addr}"))
         .await;
     logger
         .log(&format!(
@@ -1030,7 +1035,7 @@ async fn run_http_server(
         ))
         .await;
 
-    log_api_endpoints(&logger).await;
+    log_api_endpoints(logger).await;
 
     // Log minimum keep_alive setting if configured
     if let Some(min_seconds) = ollama_config.min_keep_alive_seconds {
@@ -1045,8 +1050,17 @@ async fn run_http_server(
         }
     }
 
-    // Shared configuration for all connections
-    let ollama_config = std::sync::Arc::new(ollama_config);
+    Ok(listener)
+}
+
+// Run HTTP server implementation
+async fn run_http_server(
+    addr: SocketAddr,
+    args: Args,
+    logger: Arc<Logger>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let ollama_config = setup_ollama_server(&args, &logger).await?;
+    let listener = setup_server_listener(addr, "http", &ollama_config, &logger).await?;
 
     // Accept connections in a loop
     loop {
@@ -1054,9 +1068,8 @@ async fn run_http_server(
         logger.log(&format!("Connection from: {addr}")).await;
         let io = TokioIo::new(tcp_stream);
 
-        // Clone the configuration for this connection
+        // Clone configurations for this connection
         let ollama_config = ollama_config.clone();
-        // Save the client IP for this connection
         let client_ip = addr;
 
         // Spawn a new task for each connection
@@ -1070,7 +1083,6 @@ async fn run_http_server(
             if let Err(err) = http1::Builder::new().serve_connection(io, service).await {
                 let err_msg = format!("Error serving connection: {err:?}");
                 eprintln!("{err_msg}");
-                // Cannot use logger here as it requires await which is not allowed in this context
             }
         });
     }
@@ -1083,97 +1095,18 @@ async fn run_https_server(
     args: Args,
     logger: Arc<Logger>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Create Ollama configuration
-    let ollama_config = OllamaConfig::new(
-        args.ollama_url.clone(),
-        logger.clone(),
-        args.api_key.clone(),
-        args.allowed_ips.clone(),
-        args.min_keep_alive.clone(),
-    );
-
-    logger
-        .log(&format!(
-            "Forwarding requests to Ollama server at: {}",
-            ollama_config.base_url
-        ))
-        .await;
-
-    if args.api_key.is_some() {
-        logger
-            .log("API authentication enabled for model management endpoints")
-            .await;
-    } else {
-        logger.log("WARNING: API authentication not configured. All endpoints are publicly accessible!").await;
-    }
-
-    if let Some(ref allowed_ips) = ollama_config.allowed_ips {
-        if allowed_ips.is_empty() {
-            logger
-                .log("WARNING: IP allowlist is empty. All requests will be blocked!")
-                .await;
-        } else {
-            logger
-                .log(&format!(
-                    "IP address allowlist enabled. Only {} IP addresses are allowed to connect.",
-                    allowed_ips.len()
-                ))
-                .await;
-            // Log the list of allowed IPs if it's not too large
-            if allowed_ips.len() <= 10 {
-                logger
-                    .log(&format!(
-                        "Allowed IPs: {}",
-                        allowed_ips
-                            .iter()
-                            .map(std::string::ToString::to_string)
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ))
-                    .await;
-            }
-        }
-    }
-
-    // Create a TCP listener
-    let listener = TcpListener::bind(addr).await?;
-    logger
-        .log(&format!("REST API server listening on https://{addr}"))
-        .await;
-    logger
-        .log(&format!(
-            "Root endpoint (/) forwards to Ollama server at: {}",
-            ollama_config.base_url
-        ))
-        .await;
-
-    log_api_endpoints(&logger).await;
-
-    // Log minimum keep_alive setting if configured
-    if let Some(min_seconds) = ollama_config.min_keep_alive_seconds {
-        if min_seconds < 0 {
-            logger.log("Minimum keep_alive time set to infinite").await;
-        } else {
-            logger
-                .log(&format!(
-                    "Minimum keep_alive time set to {min_seconds} seconds"
-                ))
-                .await;
-        }
-    }
+    let ollama_config = setup_ollama_server(&args, &logger).await?;
+    let listener = setup_server_listener(addr, "https", &ollama_config, &logger).await?;
 
     // Create TLS acceptor
     let tls_acceptor = TlsAcceptor::from(Arc::new(tls_config));
-
-    // Shared configuration for all connections
-    let ollama_config = std::sync::Arc::new(ollama_config);
 
     // Accept connections in a loop
     loop {
         let (tcp_stream, addr) = listener.accept().await?;
         logger.log(&format!("Connection from: {addr}")).await;
 
-        // Accept the TLS connection
+        // Clone configurations for this connection
         let tls_acceptor = tls_acceptor.clone();
         let ollama_config = ollama_config.clone();
         let logger = logger.clone();
@@ -1182,10 +1115,7 @@ async fn run_https_server(
         tokio::task::spawn(async move {
             match tls_acceptor.accept(tcp_stream).await {
                 Ok(tls_stream) => {
-                    // Convert to TokioIo
                     let io = TokioIo::new(tls_stream);
-
-                    // Save the client IP for this connection
                     let client_ip = addr;
 
                     let service = hyper::service::service_fn(move |req| {
@@ -1197,14 +1127,13 @@ async fn run_https_server(
                     if let Err(err) = http1::Builder::new().serve_connection(io, service).await {
                         let err_msg = format!("Error serving TLS connection: {err:?}");
                         eprintln!("{err_msg}");
-                        // Cannot use logger here as it requires await which is not allowed in this context
                     }
                 }
                 Err(e) => {
-                    // Log TLS handshake errors
-                    if let Ok(err_msg) =
-                        tokio::task::spawn_blocking(move || format!("TLS handshake error: {e}"))
-                            .await
+                    if let Ok(err_msg) = tokio::task::spawn_blocking(move || {
+                        format!("TLS handshake error: {e}")
+                    })
+                    .await
                     {
                         logger.log(&err_msg).await;
                     }
