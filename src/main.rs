@@ -18,8 +18,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
-use tokio_rustls::TlsAcceptor;
 use tokio::sync::mpsc::{self, Sender};
+use tokio_rustls::TlsAcceptor;
 
 // A simple type alias for convenience
 type BoxBody = http_body_util::combinators::BoxBody<Bytes, hyper::Error>;
@@ -799,8 +799,8 @@ async fn handle_api_endpoint(
         (Method::GET, ["api", "tags"]) => handle_models_endpoint(ollama_config, client_ip).await,
 
         // Model management endpoints with authentication
-        (Method::POST, ["api", "create" | "copy" | "pull" | "push"]) |
-        (Method::DELETE, ["api", "delete"]) => {
+        (Method::POST, ["api", "create" | "copy" | "pull" | "push"])
+        | (Method::DELETE, ["api", "delete"]) => {
             let operation = path_parts[1];
             handle_model_management_endpoint(req, ollama_config, path, operation, client_ip).await
         }
@@ -879,8 +879,8 @@ async fn handle_request(
     }
 
     let response = match (method.clone(), uri_path.as_str()) {
-        // API documentation
-        (Method::GET, "/") => handle_docs_endpoint(),
+        // Forward root endpoint to Ollama
+        (_, "/") => forward_to_ollama(req, &ollama_config, "/", &client_ip).await,
 
         // Proxy any Ollama API endpoints directly through our unified handler
         (_, path) if path.starts_with("/api/") => {
@@ -905,7 +905,10 @@ async fn handle_request(
 }
 
 // Function to load TLS certificates
-fn load_tls_config(cert_path: &PathBuf, key_path: &PathBuf) -> Result<ServerConfig, Box<dyn std::error::Error>> {
+fn load_tls_config(
+    cert_path: &PathBuf,
+    key_path: &PathBuf,
+) -> Result<ServerConfig, Box<dyn std::error::Error>> {
     // Load certificate
     let cert_file = File::open(cert_path)?;
     let mut cert_reader = BufReader::new(cert_file);
@@ -1006,8 +1009,8 @@ async fn run_http_server(
         .await;
     logger
         .log(&format!(
-            "Documentation available at http://127.0.0.1:{}/",
-            args.port
+            "Root endpoint (/) forwards to Ollama server at: {}",
+            ollama_config.base_url
         ))
         .await;
 
@@ -1109,8 +1112,8 @@ async fn run_https_server(
         .await;
     logger
         .log(&format!(
-            "Documentation available at https://127.0.0.1:{}/",
-            args.port
+            "Root endpoint (/) forwards to Ollama server at: {}",
+            ollama_config.base_url
         ))
         .await;
 
@@ -1156,9 +1159,10 @@ async fn run_https_server(
                 }
                 Err(e) => {
                     // Log TLS handshake errors
-                    if let Ok(err_msg) = tokio::task::spawn_blocking(move || {
-                        format!("TLS handshake error: {e}")
-                    }).await {
+                    if let Ok(err_msg) =
+                        tokio::task::spawn_blocking(move || format!("TLS handshake error: {e}"))
+                            .await
+                    {
                         logger.log(&err_msg).await;
                     }
                 }
@@ -1220,8 +1224,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if args.cert_file.is_none() || args.key_file.is_none() {
             eprintln!("Error: HTTPS mode requires both --cert-file and --key-file parameters");
             eprintln!("\nExample usage:");
-            eprintln!("  cargo run -- --https --cert-file path/to/cert.pem --key-file path/to/key.pem");
-            eprintln!("\nYou can generate a self-signed certificate for testing using the provided script:");
+            eprintln!(
+                "  cargo run -- --https --cert-file path/to/cert.pem --key-file path/to/key.pem"
+            );
+            eprintln!(
+                "\nYou can generate a self-signed certificate for testing using the provided script:"
+            );
             eprintln!("  ./generate_cert.sh");
             return Err("HTTPS mode requires both --cert-file and --key-file parameters".into());
         }
@@ -1239,8 +1247,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         logger.log("HTTPS mode enabled").await;
-        logger.log(&format!("Using certificate file: {}", cert_file.display())).await;
-        logger.log(&format!("Using private key file: {}", key_file.display())).await;
+        logger
+            .log(&format!("Using certificate file: {}", cert_file.display()))
+            .await;
+        logger
+            .log(&format!("Using private key file: {}", key_file.display()))
+            .await;
 
         // Run the server in HTTPS mode
         run_https_server(addr, tls_config, args, logger).await?;
@@ -1248,7 +1260,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Run the server in HTTP mode
         logger.log("HTTP mode enabled (no encryption)").await;
         if args.listen_public {
-            logger.log("WARNING: Server is listening on all network interfaces without encryption").await;
+            logger
+                .log("WARNING: Server is listening on all network interfaces without encryption")
+                .await;
         }
 
         run_http_server(addr, args, logger).await?;
