@@ -16,13 +16,15 @@ use std::io::BufReader;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
-use tokio::sync::mpsc::{self, Sender};
 use tokio_rustls::TlsAcceptor;
 
 mod size_parser;
-use size_parser::parse_size;
+mod logger;
+#[cfg(test)]
+mod logger_tests;
+
+use logger::Logger;
 
 // A simple type alias for convenience
 type BoxBody = http_body_util::combinators::BoxBody<Bytes, hyper::Error>;
@@ -77,208 +79,6 @@ struct Args {
     /// When this limit is reached, the oldest log files will be deleted
     #[arg(long, default_value_t = 0)]
     max_log_files: u32,
-}
-
-// Logger that can write to both console and file
-struct Logger {
-    log_sender: Sender<String>,
-}
-
-impl Logger {
-    async fn new(log_path: Option<PathBuf>, log_size_str: String, max_log_files: u32) -> Self {
-        // Parse the human-readable size format
-        let max_size_bytes = match parse_size(&log_size_str) {
-            Ok(size) => size,
-            Err(e) => {
-                eprintln!(
-                    "Error parsing log rotation size '{}': {:?}",
-                    log_size_str, e
-                );
-                eprintln!("Using default size of 10MB");
-                10 * 1024 * 1024 // Default to 10MB if parsing fails
-            }
-        };
-
-        // Create a channel for logging messages
-        let (log_sender, mut log_receiver) = mpsc::channel::<String>(100);
-
-        // Clone log_path for use in the spawned task
-        let task_log_path = log_path.clone();
-        let max_files = max_log_files; // Clone the max_log_files for the task
-
-        // Open log file if path provided
-        let log_file = if let Some(path) = log_path.clone() {
-            match tokio::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&path)
-                .await
-            {
-                Ok(file) => Some(file),
-                Err(e) => {
-                    eprintln!("Error opening log file: {e}");
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        // Spawn a background task to handle log messages
-        tokio::spawn(async move {
-            let mut file = log_file;
-            let mut current_size: u64 = if let Some(ref f) = file {
-                match f.metadata().await {
-                    Ok(metadata) => metadata.len(),
-                    Err(_) => 0,
-                }
-            } else {
-                0
-            };
-
-            while let Some(message) = log_receiver.recv().await {
-                // Always print to console
-                println!("{message}");
-
-                // Also log to file if configured
-                if file.is_some() {
-                    let message_with_newline = format!("{message}\n");
-                    let message_bytes = message_with_newline.as_bytes();
-
-                    // Check if we need to rotate the log file
-                    if max_size_bytes > 0
-                        && current_size + message_bytes.len() as u64 > max_size_bytes
-                    {
-                        if let Some(ref path) = task_log_path.clone() {
-                            drop(file);
-
-                            // Generate timestamp for the rotated log filename
-                            let timestamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
-                            let rotated_path = path.with_file_name(format!(
-                                "{}.{}",
-                                path.file_name().unwrap().to_string_lossy(),
-                                timestamp
-                            ));
-
-                            // Rename the current log file to the rotated filename
-                            if let Err(e) = tokio::fs::rename(path, &rotated_path).await {
-                                eprintln!("Error rotating log file: {e}");
-                            } else {
-                                println!("Rotated log file to: {}", rotated_path.display());
-
-                                // Clean up old log files if max_files is set
-                                if max_files > 0 {
-                                    // Try to clean up old log files
-                                    if let Err(e) = cleanup_old_log_files(path, max_files).await {
-                                        eprintln!("Error cleaning up old log files: {e}");
-                                    }
-                                }
-                            }
-
-                            // Create a new log file
-                            match tokio::fs::OpenOptions::new()
-                                .create(true)
-                                .append(true)
-                                .open(path)
-                                .await
-                            {
-                                Ok(new_file) => {
-                                    file = Some(new_file);
-                                    current_size = 0;
-                                }
-                                Err(e) => {
-                                    eprintln!("Error creating new log file after rotation: {e}");
-                                    file = None;
-                                }
-                            }
-                        }
-                    }
-
-                    // Write to the log file (either existing or newly rotated)
-                    if let Some(ref mut f) = file {
-                        // Ignore error if we can't write to the file
-                        if let Err(e) = f.write_all(message_bytes).await {
-                            eprintln!("Error writing to log file: {e}");
-                        } else {
-                            current_size += message_bytes.len() as u64;
-                        }
-                        // Try to flush, but ignore errors
-                        let _ = f.flush().await;
-                    }
-                }
-            }
-        });
-
-        Self { log_sender }
-    }
-
-    async fn log(&self, message: &str) {
-        // Send message to the logger task
-        // If send fails, just print to stderr and continue
-        if let Err(e) = self.log_sender.send(message.to_string()).await {
-            eprintln!("Failed to send log message: {e}");
-            // Fallback to direct console output
-            println!("{message}");
-        }
-    }
-}
-
-// Function to clean up old log files when max limit is reached
-async fn cleanup_old_log_files(
-    log_path: &PathBuf,
-    max_files: u32,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // First, get the base filename to match rotated files
-    let base_name = log_path
-        .file_name()
-        .ok_or("Invalid log path")?
-        .to_string_lossy()
-        .to_string();
-
-    // Get the directory of the log file
-    let dir_path = log_path.parent().unwrap_or(std::path::Path::new("."));
-
-    // Read the directory entries
-    let mut entries = Vec::new();
-    let mut dir = tokio::fs::read_dir(dir_path).await?;
-
-    // Collect all rotated log files
-    while let Some(entry) = dir.next_entry().await? {
-        let path = entry.path();
-        if let Some(filename) = path.file_name() {
-            let filename_str = filename.to_string_lossy();
-            // Check if this is a rotated log file for our base log file
-            if filename_str.starts_with(&base_name) && filename_str != base_name {
-                entries.push(path);
-            }
-        }
-    }
-
-    // If we have more files than the max allowed, delete the oldest ones
-    if entries.len() > max_files as usize {
-        // Sort files by modification time (oldest first)
-        entries.sort_by(|a, b| {
-            let a_meta = std::fs::metadata(a).ok();
-            let b_meta = std::fs::metadata(b).ok();
-
-            match (a_meta, b_meta) {
-                (Some(a_meta), Some(b_meta)) => a_meta.modified().unwrap_or_else(|_| std::time::SystemTime::UNIX_EPOCH)
-                    .cmp(&b_meta.modified().unwrap_or_else(|_| std::time::SystemTime::UNIX_EPOCH)),
-                _ => std::cmp::Ordering::Equal,
-            }
-        });
-
-        // Calculate how many files to delete
-        let files_to_delete = entries.len() - max_files as usize;
-
-        // Delete the oldest files
-        for path in entries.iter().take(files_to_delete) {
-            println!("Deleting old log file: {}", path.display());
-            tokio::fs::remove_file(path).await?;
-        }
-    }
-
-    Ok(())
 }
 
 // Function to create a boxed response body from a string

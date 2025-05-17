@@ -17,3 +17,7 @@ rustls = "0.22.1"
 rustls-pemfile = "2.0.0"
 tokio-rustls = "0.25.0"
 hyper-rustls = { version = "0.26.0", features = ["http2"] }
+
+[dev-dependencies]
+filetime = "0.2.25"
+tempfile = "3.20.0"
