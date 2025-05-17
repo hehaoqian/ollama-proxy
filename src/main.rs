@@ -84,6 +84,12 @@ struct Args {
     /// When this limit is reached, the oldest log files will be deleted
     #[arg(long, default_value_t = 0, env = "PROXY_OLLAMA_MAX_LOG_FILES")]
     max_log_files: u32,
+
+    /// Minimum keep_alive time for model (default: none)
+    /// Supports time formats like "30s", "5m", "1h30m", "3h1m5s", "-1s" (infinite)
+    /// This overrides keep_alive in client requests if they are lower than this value
+    #[arg(long, env = "PROXY_OLLAMA_MIN_KEEP_ALIVE")]
+    min_keep_alive: Option<String>,
 }
 
 // Function to create a boxed response body from a string
@@ -114,6 +120,55 @@ struct OllamaConfig {
     logger: Arc<Logger>,
     api_key: Option<String>,
     allowed_ips: Option<Vec<std::net::IpAddr>>,
+    min_keep_alive_seconds: Option<i64>, // Store as seconds, negative means infinite
+}
+
+// Parse time string in format like "1s", "1m2s", "3h1m5s", "-1s" (infinite)
+// Returns the time in seconds, negative value means infinite
+fn parse_time_string(time_str: &str) -> Result<i64, String> {
+    if time_str.is_empty() {
+        return Err("Empty time string".to_string());
+    }
+
+    // Handle negative time (infinite)
+    if time_str.starts_with('-') {
+        return Ok(-1);
+    }
+
+    let mut total_seconds = 0i64;
+    let mut current_number = 0i64;
+    let mut chars = time_str.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c.is_ascii_digit() {
+            current_number = current_number * 10 + c.to_digit(10).unwrap() as i64;
+        } else {
+            match c {
+                'h' => {
+                    total_seconds += current_number * 3600; // hours to seconds
+                    current_number = 0;
+                }
+                'm' => {
+                    total_seconds += current_number * 60; // minutes to seconds
+                    current_number = 0;
+                }
+                's' => {
+                    total_seconds += current_number; // seconds
+                    current_number = 0;
+                }
+                _ => {
+                    return Err(format!("Invalid time unit: {}", c));
+                }
+            }
+        }
+    }
+
+    // If there's a trailing number without a unit, assume it's seconds
+    if current_number > 0 {
+        total_seconds += current_number;
+    }
+
+    Ok(total_seconds)
 }
 
 impl OllamaConfig {
@@ -122,6 +177,7 @@ impl OllamaConfig {
         logger: Arc<Logger>,
         api_key: Option<String>,
         allowed_ips: Option<String>,
+        min_keep_alive: Option<String>,
     ) -> Self {
         // Parse the allowed IPs string into a vector of IpAddr
         let allowed_ips = allowed_ips.map(|ips_str| {
@@ -131,11 +187,25 @@ impl OllamaConfig {
                 .collect::<Vec<_>>()
         });
 
+        // Parse min_keep_alive string if provided
+        let min_keep_alive_seconds =
+            min_keep_alive.and_then(|time_str| match parse_time_string(&time_str) {
+                Ok(seconds) => {
+                    // Don't log here, will log in server startup
+                    Some(seconds)
+                }
+                Err(e) => {
+                    eprintln!("Warning: Could not parse min_keep_alive time: {}", e);
+                    None
+                }
+            });
+
         Self {
             base_url,
             logger,
             api_key,
             allowed_ips,
+            min_keep_alive_seconds,
         }
     }
 
@@ -488,6 +558,7 @@ async fn handle_generate_with_model_info(
     };
 
     // If we have the body bytes, check for unload request and authentication
+    let mut modified_body = None;
     if let Some(ref body_bytes) = maybe_body_bytes {
         if let Ok(json) = serde_json::from_slice::<serde_json::Value>(body_bytes) {
             // Check if this is an unload request
@@ -537,6 +608,101 @@ async fn handle_generate_with_model_info(
             } else {
                 // Normal generate request, just log it
                 log_model_info(&json, &ollama_config.logger, client_ip).await;
+
+                // If min_keep_alive is set and this is not an unload request, potentially modify keep_alive
+                if let Some(min_seconds) = ollama_config.min_keep_alive_seconds {
+                    // Only apply if min_seconds is positive (not infinite)
+                    if min_seconds > 0 {
+                        let mut modified_json = json.clone();
+                        let mut was_modified = false;
+
+                        // Apply min_keep_alive to top-level keep_alive
+                        if let Some(keep_alive) = modified_json.get("keep_alive") {
+                            let should_modify = match keep_alive {
+                                serde_json::Value::Number(n) => {
+                                    // Only modify if keep_alive is not 0 (would be unload) and is less than min_seconds
+                                    if let Some(current) = n.as_i64() {
+                                        current > 0 && current < min_seconds
+                                    } else {
+                                        false
+                                    }
+                                }
+                                serde_json::Value::String(s) => {
+                                    // Try to parse as time string
+                                    if let Ok(current) = parse_time_string(s) {
+                                        current > 0 && current < min_seconds
+                                    } else {
+                                        false
+                                    }
+                                }
+                                _ => false,
+                            };
+
+                            if should_modify {
+                                // Modify the JSON with the minimum keep_alive value
+                                if let Some(obj) = modified_json.as_object_mut() {
+                                    obj.insert(
+                                        "keep_alive".to_string(),
+                                        serde_json::Value::Number(min_seconds.into()),
+                                    );
+                                    was_modified = true;
+
+                                    ollama_config.logger
+                                        .log(&format!(
+                                            "Applied minimum keep_alive of {min_seconds}s to request from {client_ip}"
+                                        ))
+                                        .await;
+                                }
+                            }
+                        }
+
+                        // Also check options.keep_alive
+                        if let Some(options) = modified_json.get_mut("options") {
+                            if let Some(obj) = options.as_object_mut() {
+                                if let Some(keep_alive) = obj.get("keep_alive") {
+                                    let should_modify_option = match keep_alive {
+                                        serde_json::Value::Number(n) => {
+                                            if let Some(current) = n.as_i64() {
+                                                current > 0 && current < min_seconds
+                                            } else {
+                                                false
+                                            }
+                                        }
+                                        serde_json::Value::String(s) => {
+                                            if let Ok(current) = parse_time_string(s) {
+                                                current > 0 && current < min_seconds
+                                            } else {
+                                                false
+                                            }
+                                        }
+                                        _ => false,
+                                    };
+
+                                    if should_modify_option {
+                                        obj.insert(
+                                            "keep_alive".to_string(),
+                                            serde_json::Value::Number(min_seconds.into()),
+                                        );
+                                        was_modified = true;
+
+                                        ollama_config.logger
+                                            .log(&format!(
+                                                "Applied minimum keep_alive of {min_seconds}s to options in request from {client_ip}"
+                                            ))
+                                            .await;
+                                    }
+                                }
+                            }
+                        }
+
+                        // If we modified the JSON, serialize it to a new body
+                        if was_modified {
+                            if let Ok(new_body) = serde_json::to_vec(&modified_json) {
+                                modified_body = Some(Bytes::from(new_body));
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -550,7 +716,9 @@ async fn handle_generate_with_model_info(
         .uri(uri)
         .method(Method::POST)
         .body(
-            Full::new(if let Some(bytes) = maybe_body_bytes {
+            Full::new(if let Some(modified) = modified_body {
+                modified
+            } else if let Some(bytes) = maybe_body_bytes {
                 bytes
             } else {
                 Bytes::new()
@@ -901,6 +1069,7 @@ async fn run_http_server(
         logger.clone(),
         args.api_key.clone(),
         args.allowed_ips.clone(),
+        args.min_keep_alive.clone(),
     );
 
     logger
@@ -980,6 +1149,20 @@ async fn run_http_server(
 
     log_api_endpoints(&logger).await;
 
+    // Log minimum keep_alive setting if configured
+    if let Some(min_seconds) = ollama_config.min_keep_alive_seconds {
+        if min_seconds < 0 {
+            logger.log("Minimum keep_alive time set to infinite").await;
+        } else {
+            logger
+                .log(&format!(
+                    "Minimum keep_alive time set to {} seconds",
+                    min_seconds
+                ))
+                .await;
+        }
+    }
+
     // Shared configuration for all connections
     let ollama_config = std::sync::Arc::new(ollama_config);
 
@@ -1024,6 +1207,7 @@ async fn run_https_server(
         logger.clone(),
         args.api_key.clone(),
         args.allowed_ips.clone(),
+        args.min_keep_alive.clone(),
     );
 
     logger
@@ -1082,6 +1266,20 @@ async fn run_https_server(
         .await;
 
     log_api_endpoints(&logger).await;
+
+    // Log minimum keep_alive setting if configured
+    if let Some(min_seconds) = ollama_config.min_keep_alive_seconds {
+        if min_seconds < 0 {
+            logger.log("Minimum keep_alive time set to infinite").await;
+        } else {
+            logger
+                .log(&format!(
+                    "Minimum keep_alive time set to {} seconds",
+                    min_seconds
+                ))
+                .await;
+        }
+    }
 
     // Create TLS acceptor
     let tls_acceptor = TlsAcceptor::from(Arc::new(tls_config));
@@ -1161,6 +1359,11 @@ async fn log_api_endpoints(logger: &Logger) {
         .await;
     logger
         .log("  Note: To unload a model, use /api/generate with empty prompt and keep_alive: 0")
+        .await;
+
+    // If using any value format, also mention it
+    logger
+        .log("  Note: keep_alive supports time formats like \"30s\", \"5m\", \"1h30m\", \"3h1m5s\", \"-1s\" (infinite)")
         .await;
 }
 
