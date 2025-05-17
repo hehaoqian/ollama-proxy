@@ -186,7 +186,9 @@ impl OllamaConfig {
     fn build_uri(&self, path: &str) -> Result<hyper::Uri, hyper::http::uri::InvalidUri> {
         // Handle the root path specially to avoid double slashes
         let uri_str = format!("http://{}{}", self.base_url, path);
-        uri_str.parse::<hyper::Uri>().inspect_err(|_e| println!("Parse \"{path}\" fails"))
+        uri_str
+            .parse::<hyper::Uri>()
+            .inspect_err(|_e| println!("Parse \"{path}\" fails"))
     }
 
     // Check if an IP address is allowed
@@ -237,6 +239,7 @@ async fn proxy_to_ollama<B>(
     req: Request<B>,
     path: &str,
     ollama_config: &Arc<OllamaConfig>,
+    client_ip: &SocketAddr,
 ) -> Result<Response<BoxBody>, hyper::Error>
 where
     B: hyper::body::Body + Send + 'static,
@@ -255,7 +258,23 @@ where
     // Try to read the body
     let (parts, body) = req.into_parts();
     let maybe_body_bytes = match body.collect().await {
-        Ok(collected) => Some(collected.to_bytes()),
+        Ok(collected) => {
+            let bytes = collected.to_bytes();
+
+            // Log detailed request in JSON format
+            log_detailed_json(
+                &ollama_config.logger,
+                "request",
+                &parts.method,
+                path,
+                None,
+                &bytes,
+                client_ip,
+            )
+            .await;
+
+            Some(bytes)
+        }
         Err(e) => {
             let err_msg = format!("Error collecting request body: {e:?}");
             ollama_config.logger.log(&err_msg).await;
@@ -307,6 +326,18 @@ where
             match body.collect().await {
                 Ok(collected) => {
                     let bytes = collected.to_bytes();
+
+                    // Log detailed response in JSON format
+                    log_detailed_json(
+                        &ollama_config.logger,
+                        "response",
+                        &Method::GET, // Response doesn't have a method, using GET as placeholder
+                        path,
+                        Some(status),
+                        &bytes,
+                        client_ip,
+                    )
+                    .await;
 
                     // Build our response
                     let mut builder = Response::builder().status(status);
@@ -560,7 +591,7 @@ async fn handle_generate_with_model_info(
         .expect("Failed to create request");
 
     // Forward the request directly to Ollama
-    if let Ok(response) = proxy_to_ollama(req, "/api/generate", ollama_config).await {
+    if let Ok(response) = proxy_to_ollama(req, "/api/generate", ollama_config, client_ip).await {
         response
     } else {
         // Fallback to mock response if Ollama is unavailable
@@ -639,6 +670,7 @@ async fn handle_ollama_endpoint_with_fallback<F>(
     path: &str,
     ollama_config: &Arc<OllamaConfig>,
     log_message: &str,
+    client_ip: &SocketAddr,
     fallback_generator: F,
 ) -> Response<BoxBody>
 where
@@ -658,7 +690,7 @@ where
         .expect("Failed to create request");
 
     // Forward the request directly to Ollama
-    match proxy_to_ollama(req, path, ollama_config).await {
+    match proxy_to_ollama(req, path, ollama_config, client_ip).await {
         Ok(response) => response,
         Err(_) => {
             // Fallback to mock response if Ollama is unavailable
@@ -689,6 +721,7 @@ async fn handle_models_endpoint(
         "/api/tags",
         ollama_config,
         &format!("Forwarding request to list models to Ollama from {client_ip}"),
+        client_ip,
         || {
             // Simulate a list of models
             let models = serde_json::json!({
@@ -754,7 +787,7 @@ async fn handle_model_management_endpoint(
         .await;
 
     // Forward to Ollama server
-    proxy_to_ollama(req, path, ollama_config)
+    proxy_to_ollama(req, path, ollama_config, client_ip)
         .await
         .unwrap_or_else(|e| handle_proxy_error(&e))
 }
@@ -773,7 +806,7 @@ async fn forward_to_ollama(
         ))
         .await;
 
-    proxy_to_ollama(req, path, ollama_config)
+    proxy_to_ollama(req, path, ollama_config, client_ip)
         .await
         .unwrap_or_else(|e| handle_proxy_error(&e))
 }
@@ -1199,6 +1232,50 @@ async fn log_api_endpoints(logger: &Logger) {
     logger
         .log("  Note: To unload a model, use /api/generate with empty prompt and keep_alive: 0")
         .await;
+}
+
+// Helper function to create detailed JSON logs for requests and responses
+async fn log_detailed_json(
+    logger: &Logger,
+    direction: &str,
+    method: &Method,
+    path: &str,
+    status: Option<StatusCode>,
+    body_bytes: &Bytes,
+    client_ip: &SocketAddr,
+) {
+    // Try to parse the body as JSON for prettier logging
+    let body_str = String::from_utf8_lossy(body_bytes);
+    let body_json = if !body_bytes.is_empty() {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&body_str) {
+            value
+        } else {
+            // If not valid JSON, create a JSON string with the content
+            serde_json::json!({ "content": body_str })
+        }
+    } else {
+        serde_json::json!({ "content": "<empty>" })
+    };
+
+    let status_code = status.map(|s| s.as_u16()).unwrap_or(0);
+
+    // Create the detailed log entry
+    let log_entry = serde_json::json!({
+        "timestamp": Local::now().to_rfc3339(),
+        "direction": direction,
+        "client_ip": client_ip.to_string(),
+        "method": method.to_string(),
+        "path": path,
+        "status": status_code,
+        "body": body_json
+    });
+
+    // Log the JSON entry
+    if let Ok(log_json) = serde_json::to_string_pretty(&log_entry) {
+        logger.log(&format!("DETAILED JSON LOG: {log_json}")).await;
+    } else {
+        logger.log("Failed to serialize detailed log to JSON").await;
+    }
 }
 
 #[tokio::main]
