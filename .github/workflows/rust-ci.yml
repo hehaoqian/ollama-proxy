@@ -6,14 +6,22 @@ on:
   pull_request:
     branches: [ main, master ]
 
+  schedule:
+    # Run weekly on Monday at 00:00 UTC
+    - cron: '0 0 * * 1'
+  workflow_dispatch:  # Allow manual triggering
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"  # Treat warnings as errors
 
 jobs:
   check:
-    name: Check, Lint, and Test
-    runs-on: ubuntu-latest
+    name: Test on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v3
 
