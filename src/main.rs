@@ -19,12 +19,16 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 
+mod db_logger;
+#[cfg(test)]
+mod db_logger_tests;
 mod logger;
 #[cfg(test)]
 mod logger_tests;
 mod size_parser;
 mod time_parser;
 
+use db_logger::DbLogger;
 use logger::Logger;
 use time_parser::parse_time_string;
 
@@ -60,6 +64,12 @@ struct Args {
     /// Example: --allowed-ips "127.0.0.1,192.168.1.5"
     #[arg(long, env = "PROXY_OLLAMA_ALLOWED_IPS")]
     allowed_ips: Option<String>,
+
+    /// Database URL for request/response logging (SQLite format)
+    /// Example: "sqlite:logs.db"
+    #[cfg(feature = "database-logging")]
+    #[arg(long, env = "PROXY_OLLAMA_DB_URL")]
+    db_url: Option<String>,
 
     /// Enable HTTPS mode. If not set, server will use HTTP
     #[arg(long, env = "PROXY_OLLAMA_HTTPS")]
@@ -123,6 +133,7 @@ struct OllamaConfig {
     api_key: Option<String>,
     allowed_ips: Option<Vec<std::net::IpAddr>>,
     min_keep_alive_seconds: Option<i64>, // Store as seconds, negative means infinite
+    db_logger: Arc<DbLogger>,
 }
 
 impl OllamaConfig {
@@ -132,6 +143,7 @@ impl OllamaConfig {
         api_key: Option<String>,
         allowed_ips: Option<String>,
         min_keep_alive: Option<String>,
+        db_logger: Arc<DbLogger>,
     ) -> Self {
         // Parse the allowed IPs string into a vector of IpAddr
         let allowed_ips = allowed_ips.map(|ips_str| {
@@ -160,6 +172,7 @@ impl OllamaConfig {
             api_key,
             allowed_ips,
             min_keep_alive_seconds,
+            db_logger,
         }
     }
 
@@ -258,6 +271,12 @@ where
             )
             .await;
 
+            // Log to database if enabled
+            ollama_config
+                .db_logger
+                .log_request(client_ip, &parts.method, path, &parts.headers, &bytes)
+                .await;
+
             Some(bytes)
         }
         Err(e) => {
@@ -324,6 +343,19 @@ where
                         &parts.headers,
                     )
                     .await;
+
+                    // Log to database if enabled
+                    ollama_config
+                        .db_logger
+                        .log_response(
+                            client_ip,
+                            &Method::GET, // Response doesn't have a method, using GET as placeholder
+                            path,
+                            &status,
+                            &parts.headers,
+                            &bytes,
+                        )
+                        .await;
 
                     // Build our response
                     let mut builder = Response::builder().status(status);
@@ -493,7 +525,10 @@ fn create_generate_fallback_response() -> Response<BoxBody> {
 }
 
 // Helper: Check if unload request is authenticated
-fn is_unload_request_authenticated(headers: &hyper::HeaderMap<hyper::header::HeaderValue>, ollama_config: &OllamaConfig) -> bool {
+fn is_unload_request_authenticated(
+    headers: &hyper::HeaderMap<hyper::header::HeaderValue>,
+    ollama_config: &OllamaConfig,
+) -> bool {
     if let Some(ref api_key) = ollama_config.api_key {
         if let Some(auth_header) = headers.get("Authorization") {
             if let Ok(auth_str) = auth_header.to_str() {
@@ -521,13 +556,19 @@ async fn apply_min_keep_alive_and_log(
             // Top-level keep_alive
             if let Some(keep_alive) = modified_json.get("keep_alive") {
                 let should_modify = match keep_alive {
-                    serde_json::Value::Number(n) => n.as_i64().is_some_and(|current| current > 0 && current < min_seconds),
-                    serde_json::Value::String(s) => parse_time_string(s).is_ok_and(|current| current > 0 && current < min_seconds),
+                    serde_json::Value::Number(n) => n
+                        .as_i64()
+                        .is_some_and(|current| current > 0 && current < min_seconds),
+                    serde_json::Value::String(s) => parse_time_string(s)
+                        .is_ok_and(|current| current > 0 && current < min_seconds),
                     _ => false,
                 };
                 if should_modify {
                     if let Some(obj) = modified_json.as_object_mut() {
-                        obj.insert("keep_alive".to_string(), serde_json::Value::Number(min_seconds.into()));
+                        obj.insert(
+                            "keep_alive".to_string(),
+                            serde_json::Value::Number(min_seconds.into()),
+                        );
                         was_modified = true;
                         ollama_config.logger.log(&format!("Applied minimum keep_alive of {min_seconds}s to request from {client_ip}")).await;
                     }
@@ -538,12 +579,18 @@ async fn apply_min_keep_alive_and_log(
                 if let Some(obj) = options.as_object_mut() {
                     if let Some(keep_alive) = obj.get("keep_alive") {
                         let should_modify_option = match keep_alive {
-                            serde_json::Value::Number(n) => n.as_i64().is_some_and(|current| current > 0 && current < min_seconds),
-                            serde_json::Value::String(s) => parse_time_string(s).is_ok_and(|current| current > 0 && current < min_seconds),
+                            serde_json::Value::Number(n) => n
+                                .as_i64()
+                                .is_some_and(|current| current > 0 && current < min_seconds),
+                            serde_json::Value::String(s) => parse_time_string(s)
+                                .is_ok_and(|current| current > 0 && current < min_seconds),
                             _ => false,
                         };
                         if should_modify_option {
-                            obj.insert("keep_alive".to_string(), serde_json::Value::Number(min_seconds.into()));
+                            obj.insert(
+                                "keep_alive".to_string(),
+                                serde_json::Value::Number(min_seconds.into()),
+                            );
                             was_modified = true;
                             ollama_config.logger.log(&format!("Applied minimum keep_alive of {min_seconds}s to options in request from {client_ip}")).await;
                         }
@@ -561,16 +608,11 @@ async fn apply_min_keep_alive_and_log(
 }
 
 // Helper: Build request for Ollama
-fn build_ollama_generate_request(
-    uri: hyper::Uri,
-    body: Bytes,
-) -> Request<BoxBody> {
+fn build_ollama_generate_request(uri: hyper::Uri, body: Bytes) -> Request<BoxBody> {
     Request::builder()
         .uri(uri)
         .method(Method::POST)
-        .body(Full::new(body)
-            .map_err(|never| match never {})
-            .boxed())
+        .body(Full::new(body).map_err(|never| match never {}).boxed())
         .expect("Failed to create request")
 }
 
@@ -597,11 +639,21 @@ async fn handle_generate_with_model_info(
             if is_unload_model_request(&json) {
                 let is_auth = is_unload_request_authenticated(&headers, ollama_config);
                 if !is_auth {
-                    ollama_config.logger.log(&format!("Unauthorized attempt to unload model from {client_ip}")).await;
+                    ollama_config
+                        .logger
+                        .log(&format!(
+                            "Unauthorized attempt to unload model from {client_ip}"
+                        ))
+                        .await;
                     return handle_unauthorized();
                 }
                 if let Some(model) = json.get("model").and_then(|m| m.as_str()) {
-                    ollama_config.logger.log(&format!("Unloading model from memory (authenticated) from {client_ip}: {model}")).await;
+                    ollama_config
+                        .logger
+                        .log(&format!(
+                            "Unloading model from memory (authenticated) from {client_ip}: {model}"
+                        ))
+                        .await;
                 }
             } else {
                 log_model_info(&json, &ollama_config.logger, client_ip).await;
@@ -609,7 +661,9 @@ async fn handle_generate_with_model_info(
             }
         }
     }
-    let uri = ollama_config.build_uri(path).expect("Failed to build URI for generate endpoint");
+    let uri = ollama_config
+        .build_uri(path)
+        .expect("Failed to build URI for generate endpoint");
     let req = build_ollama_generate_request(
         uri,
         if let Some(modified) = modified_body {
@@ -623,7 +677,12 @@ async fn handle_generate_with_model_info(
     if let Ok(response) = proxy_to_ollama(req, path, ollama_config, client_ip).await {
         response
     } else {
-        ollama_config.logger.log(&format!("Failed to get response from Ollama for {client_ip}, using mock response")).await;
+        ollama_config
+            .logger
+            .log(&format!(
+                "Failed to get response from Ollama for {client_ip}, using mock response"
+            ))
+            .await;
         create_generate_fallback_response()
     }
 }
@@ -654,7 +713,9 @@ where
         .expect("Failed to create request");
 
     // Forward the request directly to Ollama
-    if let Ok(response) = proxy_to_ollama(req, path, ollama_config, client_ip).await { response } else {
+    if let Ok(response) = proxy_to_ollama(req, path, ollama_config, client_ip).await {
+        response
+    } else {
         // Fallback to mock response if Ollama is unavailable
         ollama_config
             .logger
@@ -786,7 +847,7 @@ async fn handle_api_endpoint(
 
     match (method, path_parts.as_slice()) {
         // Generate endpoint - Forward with model info handling
-        (Method::POST, ["api", "generate" | "chat" | "embed" | "embeddings" ])=> {
+        (Method::POST, ["api", "generate" | "chat" | "embed" | "embeddings"]) => {
             handle_generate_with_model_info(req, ollama_config, path, client_ip).await
         }
 
@@ -945,12 +1006,22 @@ async fn setup_ollama_server(
     args: &Args,
     logger: &Arc<Logger>,
 ) -> Result<Arc<OllamaConfig>, Box<dyn std::error::Error>> {
+    // Initialize database logger
+    #[cfg(feature = "database-logging")]
+    let db_url = args.db_url.clone();
+    #[cfg(not(feature = "database-logging"))]
+    let db_url = None;
+
+    let db_logger = Arc::new(DbLogger::new(db_url).await);
+
+    // Initialize Ollama config
     let ollama_config = OllamaConfig::new(
         args.ollama_url.clone(),
         logger.clone(),
         args.api_key.clone(),
         args.allowed_ips.clone(),
         args.min_keep_alive.clone(),
+        db_logger,
     );
 
     // Log server configuration
@@ -962,7 +1033,9 @@ async fn setup_ollama_server(
         .await;
 
     if args.api_key.is_some() {
-        logger.log("API authentication enabled for model management endpoints").await;
+        logger
+            .log("API authentication enabled for model management endpoints")
+            .await;
     } else {
         logger.log("WARNING: API authentication not configured. All endpoints are publicly accessible!").await;
     }
@@ -970,7 +1043,9 @@ async fn setup_ollama_server(
     // Log allowlist information
     if let Some(ref allowed_ips) = ollama_config.allowed_ips {
         if allowed_ips.is_empty() {
-            logger.log("WARNING: IP allowlist is empty. All requests will be blocked!").await;
+            logger
+                .log("WARNING: IP allowlist is empty. All requests will be blocked!")
+                .await;
         } else {
             logger
                 .log(&format!(
@@ -1013,6 +1088,20 @@ async fn setup_ollama_server(
     } else {
         logger.log("Logging to console only (no log file)").await;
     }
+
+    // Log database logging information
+    #[cfg(feature = "database-logging")]
+    if let Some(ref url) = args.db_url {
+        logger
+            .log(&format!("Database logging enabled: {url}"))
+            .await;
+    }
+    #[cfg(feature = "database-logging")]
+    if args.db_url.is_none() {
+        logger.log("Database logging feature is enabled but no DB URL provided. Use --db-url to enable database logging.").await;
+    }
+    #[cfg(not(feature = "database-logging"))]
+    logger.log("Database logging feature is disabled. Recompile with --feature=database-logging to enable.").await;
 
     Ok(Arc::new(ollama_config))
 }
@@ -1130,10 +1219,9 @@ async fn run_https_server(
                     }
                 }
                 Err(e) => {
-                    if let Ok(err_msg) = tokio::task::spawn_blocking(move || {
-                        format!("TLS handshake error: {e}")
-                    })
-                    .await
+                    if let Ok(err_msg) =
+                        tokio::task::spawn_blocking(move || format!("TLS handshake error: {e}"))
+                            .await
                     {
                         logger.log(&err_msg).await;
                     }
@@ -1212,11 +1300,14 @@ async fn log_detailed_json(
     let status_code = status.map_or(0, |s| s.as_u16());
 
     // Convert headers to a map of string -> string
-    let headers_json = headers.iter().map(|(k, v)| {
-        let key = k.as_str().to_string();
-        let value = v.to_str().unwrap_or("").to_string();
-        (key, value)
-    }).collect::<std::collections::BTreeMap<_, _>>();
+    let headers_json = headers
+        .iter()
+        .map(|(k, v)| {
+            let key = k.as_str().to_string();
+            let value = v.to_str().unwrap_or("").to_string();
+            (key, value)
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
 
     // Create the detailed log entry
     let log_entry = serde_json::json!({
@@ -1247,9 +1338,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ip = match args.host.parse::<std::net::IpAddr>() {
         Ok(addr) => addr,
         Err(e) => {
-            eprintln!(
-                "Error parsing host address: {e}. Please provide a valid IP address."
-            );
+            eprintln!("Error parsing host address: {e}. Please provide a valid IP address.");
             return Err(format!("Invalid host address: {}", args.host).into());
         }
     };

@@ -17,9 +17,7 @@ impl Logger {
         let max_size_bytes = match parse_size(&log_size_str) {
             Ok(size) => size,
             Err(e) => {
-                eprintln!(
-                    "Error parsing log rotation size '{log_size_str}': {e:?}"
-                );
+                eprintln!("Error parsing log rotation size '{log_size_str}': {e:?}");
                 eprintln!("Using default size of 10MB");
                 10 * 1024 * 1024 // Default to 10MB if parsing fails
             }

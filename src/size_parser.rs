@@ -25,9 +25,7 @@ pub fn parse_size(size_str: &str) -> Result<u64, SizeParseError> {
 
     // If it's just a number, interpret as bytes
     if size_str.chars().all(|c| c.is_ascii_digit()) {
-        return size_str
-            .parse::<u64>()
-            .map_err(|_| SizeParseError::Number);
+        return size_str.parse::<u64>().map_err(|_| SizeParseError::Number);
     }
 
     // Find the split between number and unit
@@ -45,9 +43,7 @@ pub fn parse_size(size_str: &str) -> Result<u64, SizeParseError> {
 
     // Parse the number part
     let num_str = &size_str[..num_end];
-    let number = num_str
-        .parse::<f64>()
-        .map_err(|_| SizeParseError::Number)?;
+    let number = num_str.parse::<f64>().map_err(|_| SizeParseError::Number)?;
 
     // Parse the unit part
     let unit = size_str[num_end..].trim().to_lowercase();

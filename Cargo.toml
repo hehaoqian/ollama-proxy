@@ -3,6 +3,10 @@ name = "http_server"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["database-logging"]
+database-logging = ["dep:sqlx"]
+
 [dependencies]
 hyper = { version = "1.1.0", features = ["full"] }
 hyper-util = { version = "0.1.2", features = ["full", "client"] }
@@ -11,12 +15,13 @@ http-body-util = "0.1.0"
 bytes = "1.5.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-chrono = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.5", features = ["derive", "env"] }
 rustls = "0.22.1"
 rustls-pemfile = "2.0.0"
 tokio-rustls = "0.25.0"
 hyper-rustls = { version = "0.26.0", features = ["http2"] }
+sqlx = { version = "0.7", features = ["runtime-tokio", "sqlite", "chrono", "json"], optional = true }
 
 [dev-dependencies]
 filetime = "0.2.25"
