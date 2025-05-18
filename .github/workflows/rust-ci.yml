@@ -73,6 +73,7 @@ jobs:
         with:
           name: cargo-proxy
           path: target/package/ollama-proxy-*.crate
+          if-no-files-found: error
 
       - name: Run tests
         run: cargo test --locked --release --all-features
