@@ -484,12 +484,10 @@ fn is_unload_model_request(json: &serde_json::Value) -> bool {
     // 1. No prompt field at all, or
     // 2. An empty prompt field
     // combined with keep_alive: 0 indicates an unload request
-    let prompt_is_empty = match json.get("prompt") {
+    match json.get("prompt") {
         Some(prompt) => prompt.as_str().is_some_and(str::is_empty),
         None => true, // No prompt field is valid for unload request
-    };
-
-    prompt_is_empty
+    }
 }
 
 // Extract and log model information from generate request
