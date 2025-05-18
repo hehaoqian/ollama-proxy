@@ -16,15 +16,16 @@ jobs:
       - name: Run publish dry-run first run
         run: |
           cargo publish --dry-run
-          sha256sum target/package/*.crate > SHA256SUMS.txt
-          cat SHA256SUMS.txt
+          mkdir -p .github/temp
+          sha256sum target/package/*.crate > .github/temp/SHA256SUMS.txt
+          cat .github/temp/SHA256SUMS.txt
           rm -r target/
 
       - name: Run publish dry-run second run
         run: |
           cargo publish --dry-run
-          cat SHA256SUMS.txt
-          sha256sum -c SHA256SUMS.txt
+          cat .github/temp/SHA256SUMS.txt
+          sha256sum -c .github/temp/SHA256SUMS.txt
           rm -r target/
 
       - name: Publish using cargo
@@ -36,8 +37,8 @@ jobs:
 
       - name: Verify checksum after publish
         run: |
-          cat SHA256SUMS.txt
-          sha256sum -c SHA256SUMS.txt
+          cat .github/temp/SHA256SUMS.txt
+          sha256sum -c .github/temp/SHA256SUMS.txt
 
       - name: Archive artifacts
         uses: actions/upload-artifact@v4
