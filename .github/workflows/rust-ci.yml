@@ -45,10 +45,13 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Run publish dry-run
-        uses: actions-rs/cargo@v1
+        run: cargo publish --dry-run
+
+      - name: Archive artifacts
+        uses: actions/upload-artifact@v4
         with:
-          command: publish
-          args: --dry-run
+          name: cargo-proxy
+          path: target/*/*.crate
 
       - name: Run tests
         run: cargo test --all-features
