@@ -1,7 +1,7 @@
 name: Publish
 
 on:
-  workflow_call:
+  workflow_dispatch:
     inputs:
       dry:
         description: 'Do not do actual publish'
