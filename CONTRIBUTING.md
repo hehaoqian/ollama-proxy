@@ -20,34 +20,6 @@ cargo clippy
 
 Our CI pipeline will verify that your code follows these guidelines.
 
-## Running CI Locally
-
-You can run all CI checks locally with:
-
-```bash
-./run-ci.sh
-```
-
-This will run the same checks that the GitHub Actions workflows run, making sure your code is ready for submission.
-
-The script supports various options for more targeted checks:
-
-```bash
-# Run only format checking
-./run-ci.sh --format-only
-
-# Run only clippy linting
-./run-ci.sh --clippy-only
-
-# Include security audits (requires cargo-audit and cargo-outdated)
-./run-ci.sh --security
-
-# Run all tests, including ones marked as #[ignore]
-./run-ci.sh --test-only --include-ignored
-```
-
-See the [CI documentation](README.md#running-ci-locally) for more details.
-
 ## Commit Messages
 
 We follow the [Conventional Commits](https://www.conventionalcommits.org/) specification for commit messages. Please read our [CONVENTIONAL_COMMITS.md](CONVENTIONAL_COMMITS.md) guide for details.

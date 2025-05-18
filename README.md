@@ -6,64 +6,6 @@
 
 This is a lightweight HTTP server that acts as a proxy for the Ollama API. It forwards requests to an Ollama server and provides additional features like API authentication, IP allowlisting, and HTTPS support.
 
-## Continuous Integration
-
-This project uses GitHub Actions for continuous integration:
-
-- **Rust CI**: Runs `cargo fmt`, `cargo clippy`, `cargo doc`, and `cargo test` on every push and pull request
-- **Security Audit**: Runs `cargo audit` to check for vulnerabilities in dependencies
-- **Cross-Platform Tests**: Ensures the application works on Windows, macOS, and Linux
-- **Scheduled Checks**: Weekly verification with the latest Rust toolchain
-
-All checks treat warnings as errors to maintain high code quality.
-
-### Running CI Locally
-
-You can run the same CI checks locally using the provided script:
-
-```bash
-./run-ci.sh
-```
-
-This script will:
-
-1. Check for required tools and install them if needed
-2. Run `cargo fmt` to verify code formatting
-3. Run `cargo clippy` with warnings treated as errors
-4. Build documentation with `cargo doc` and check for documentation warnings
-5. Run all tests with `cargo test`
-
-The script will exit with an error if any of the checks fail, making it easy to catch issues before pushing to GitHub.
-
-#### Options
-
-The CI script supports several command-line options:
-
-```bash
-Usage: ./run-ci.sh [options]
-Options:
-  -h, --help             Show this help message
-  -f, --format-only      Run only formatting checks
-  -c, --clippy-only      Run only clippy checks
-  -d, --doc-only         Run only documentation build
-  -t, --test-only        Run only tests
-  -i, --include-ignored  Include ignored tests
-  -s, --security         Run security audit (requires cargo-audit)
-  --no-features          Don't use the --all-features flag
-```
-
-For example, to run only the formatting check:
-
-```bash
-./run-ci.sh --format-only
-```
-
-Or to include security audits with your CI checks:
-
-```bash
-./run-ci.sh --security
-```
-
 ## Features
 
 - **API Forwarding:** Forwards requests to an Ollama API server
@@ -186,27 +128,3 @@ Database logging is a compiled feature that can be disabled at build time by exc
 ```bash
 cargo build --no-default-features
 ```
-
-## Testing HTTPS
-
-To quickly test the HTTPS functionality, use the provided demo script:
-
-```bash
-./demo_https.sh
-```
-
-This script will:
-
-1. Generate self-signed certificates if they don't exist
-2. Build the server
-3. Start the server with HTTPS enabled
-4. Test the connection using curl
-5. Show instructions for further testing
-
-You can also manually test the HTTPS connection using the included test script:
-
-```bash
-./test_https.sh -p 3001 -v  # -v for verbose output
-```
-
-For production use, replace the self-signed certificate with a proper SSL certificate from a trusted certificate authority.
