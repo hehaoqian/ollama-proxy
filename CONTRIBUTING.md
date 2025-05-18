@@ -70,4 +70,5 @@ When adding new optional features, please use appropriate feature flags.
 
 ## License
 
-By contributing to this project, you agree that your contributions will be licensed under the project's MIT License.
+By contributing to this project, you agree that your contributions will be licensed under
+both the MIT license and the Apache License (Version 2.0)
