@@ -42,10 +42,10 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Check build
-        run: cargo build --locked --all-targets --all-features -- -D warnings
+        run: cargo build --locked --all-targets --all-features
 
       - name: Check build with no default features
-        run: cargo build --locked --all-targets --no-default-features -- -D warnings
+        run: cargo build --locked --all-targets --no-default-features
 
       - name: Check with Clippy
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
