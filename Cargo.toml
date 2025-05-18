@@ -22,11 +22,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.5", features = ["derive", "env"] }
-rustls = "0.22"
+rustls = "0.23"
 rustls-pemfile = "2"
-tokio-rustls = "0.25"
-hyper-rustls = { version = "0.26", features = ["http2"] }
-sqlx = { version = "0.7", features = ["runtime-tokio", "sqlite", "chrono", "json"], optional = true }
+tokio-rustls = "0.26"
+hyper-rustls = { version = "0.27", features = ["http2"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "chrono", "json"], optional = true }
 
 [dev-dependencies]
 filetime = "0.2"
