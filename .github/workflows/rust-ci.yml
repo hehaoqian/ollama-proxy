@@ -44,8 +44,7 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Run publish dry-run first run
-        run: |
-          cargo publish --dry-run
+        run: cargo publish --dry-run
 
       - name: Run publish dry-run second run
         if: runner.os == 'Linux'
