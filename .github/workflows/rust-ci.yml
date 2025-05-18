@@ -73,3 +73,38 @@ jobs:
           args: --no-deps --all-features --document-private-items
         env:
           RUSTDOCFLAGS: "-D warnings"  # Treat doc warnings as errors
+
+  msrv:
+    name: Test Minimum Supported Rust Version (MSRV)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Extract MSRV from Cargo.toml
+        id: msrv
+        run: |
+          MSRV=$(grep -E '^rust-version\s*=' Cargo.toml | head -n1 | sed -E 's/.*=\s*"([^"]+)".*/\1/')
+          if [ -z "$MSRV" ]; then
+            echo "MSRV not found in Cargo.toml"
+            exit 1
+          fi
+          echo "msrv=$MSRV" >> $GITHUB_OUTPUT
+
+      - name: Install MSRV toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: ${{ steps.msrv.outputs.msrv }}
+          override: true
+
+      - name: Check with MSRV
+        uses: actions-rs/cargo@v1
+        with:
+          command: check
+          args: --all-features
+
+      - name: Test with MSRV
+        uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: --all-features
