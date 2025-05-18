@@ -3,6 +3,11 @@ name: Publish
 on:
   workflow_dispatch:  # Allow manual triggering
 
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+  CARGO_INCREMENTAL: 0
+
 jobs:
   publish:
     name: Cargo Publish
@@ -15,7 +20,7 @@ jobs:
 
       - name: Run publish dry-run first run
         run: |
-          cargo publish --dry-run
+          cargo publish --locked --dry-run
           mkdir -p .github/temp
           sha256sum target/package/*.crate > .github/temp/SHA256SUMS.txt
           cat .github/temp/SHA256SUMS.txt
@@ -23,13 +28,13 @@ jobs:
 
       - name: Run publish dry-run second run
         run: |
-          cargo publish --dry-run
+          cargo publish --locked --dry-run
           cat .github/temp/SHA256SUMS.txt
           sha256sum -c .github/temp/SHA256SUMS.txt
           rm -r target/
 
       - name: Publish using cargo
-        run: cargo publish
+        run: cargo publish --locked
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
           CARGO_TERM_COLOR: always
