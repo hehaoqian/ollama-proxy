@@ -2,6 +2,11 @@
 name = "http_server"
 version = "0.1.0"
 edition = "2024"
+build = "build.rs"
+description = "A proxy server for the Ollama API with authentication, IP allowlisting, and HTTPS support"
+repository = "https://github.com/yourusername/ollama-proxy"
+license = "MIT"
+readme = "README.md"
 
 [features]
 default = ["database-logging"]

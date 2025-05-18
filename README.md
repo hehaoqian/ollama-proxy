@@ -1,6 +1,21 @@
 # Ollama API Proxy Server
 
+[![Rust CI](https://github.com/yourusername/ollama-proxy/actions/workflows/rust-ci.yml/badge.svg)](https://github.com/yourusername/ollama-proxy/actions/workflows/rust-ci.yml)
+[![Security Audit](https://github.com/yourusername/ollama-proxy/actions/workflows/security-audit.yml/badge.svg)](https://github.com/yourusername/ollama-proxy/actions/workflows/security-audit.yml)
+[![Cross-Platform Tests](https://github.com/yourusername/ollama-proxy/actions/workflows/cross-platform.yml/badge.svg)](https://github.com/yourusername/ollama-proxy/actions/workflows/cross-platform.yml)
+
 This is a lightweight HTTP server that acts as a proxy for the Ollama API. It forwards requests to an Ollama server and provides additional features like API authentication, IP allowlisting, and HTTPS support.
+
+## Continuous Integration
+
+This project uses GitHub Actions for continuous integration:
+
+- **Rust CI**: Runs `cargo fmt`, `cargo clippy`, `cargo doc`, and `cargo test` on every push and pull request
+- **Security Audit**: Runs `cargo audit` to check for vulnerabilities in dependencies
+- **Cross-Platform Tests**: Ensures the application works on Windows, macOS, and Linux
+- **Scheduled Checks**: Weekly verification with the latest Rust toolchain
+
+All checks treat warnings as errors to maintain high code quality.
 
 ## Features
 

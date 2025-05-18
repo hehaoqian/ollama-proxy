@@ -93,7 +93,6 @@ mod tests {
         assert_eq!(parse_size("1GB").unwrap(), 1024 * 1024 * 1024);
 
         // Test decimal values
-        #[allow(clippy::cast_possible_truncation)]
         assert_eq!(parse_size("1.5MB").unwrap(), (1.5 * 1024.0 * 1024.0) as u64);
 
         // Test whitespace
