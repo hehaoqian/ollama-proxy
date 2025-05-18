@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 #[cfg(feature = "database-logging")]
-use sqlx::{Pool, Sqlite, sqlite::SqlitePool};
+use sqlx::{sqlite::SqlitePool, Pool, Sqlite};
 
 /// Database logger implementation for SQLite
 #[derive(Clone)]

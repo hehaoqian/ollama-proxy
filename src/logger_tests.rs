@@ -6,7 +6,7 @@ use tokio::fs;
 use tokio::test;
 use tokio::time::sleep;
 
-use crate::logger::{Logger, cleanup_old_log_files};
+use crate::logger::{cleanup_old_log_files, Logger};
 
 #[test]
 async fn test_logger_no_file() {
