@@ -1,13 +1,14 @@
 [package]
 name = "ollama_proxy"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 build = "build.rs"
 description = "A proxy server for the Ollama API with authentication, IP allowlisting, and HTTPS support"
 repository = "https://github.com/hehaoqian/ollama-proxy"
 license = "MIT"
 readme = "README.md"
 default-run = "ollama_proxy"
+rust-version = "1.82"
 
 [features]
 default = ["database-logging"]
