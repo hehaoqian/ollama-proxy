@@ -67,7 +67,7 @@ jobs:
           path: target/*/*.crate
 
       - name: Run tests
-        run: cargo test --all-features
+        run: cargo test --release --all-features
 
   docs:
     name: Build Documentation
@@ -108,4 +108,4 @@ jobs:
         run: cargo +${{ steps.msrv.outputs.msrv }} check
 
       - name: Test with MSRV
-        run: cargo +${{ steps.msrv.outputs.msrv }} test
+        run: cargo +${{ steps.msrv.outputs.msrv }} test --release
