@@ -5,11 +5,12 @@
 
 ## Disclaimer
 
-This project is **NOT** affiliated with the ollama project hosted at <https://github.com/ollama/ollama>
+1. This project depends on the [ollama](https://github.com/ollama/ollama) project,
+but the author of this project is **NOT** affiliated with the [ollama](https://github.com/ollama/ollama) project.
+
+2. WARNING: This project is in early development. Use at your own risk. Use in production is not recommended.
 
 ## Introduction
-
-WARNING: This crate is in early development. Use at your own risk. Use in production is not recommended.
 
 This is a lightweight HTTP server that acts as a proxy for the Ollama API. It forwards requests to an Ollama server and provides additional features like API authentication, IP allowlisting, and HTTPS support.
 
