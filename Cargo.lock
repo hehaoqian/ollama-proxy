@@ -793,28 +793,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "http_server"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "chrono",
- "clap",
- "filetime",
- "http-body-util",
- "hyper",
- "hyper-rustls",
- "hyper-util",
- "rustls",
- "rustls-pemfile",
- "serde",
- "serde_json",
- "sqlx",
- "tempfile",
- "tokio",
- "tokio-rustls",
-]
-
-[[package]]
 name = "httparse"
 version = "1.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1267,6 +1245,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "62948e14d923ea95ea2c7c86c71013138b66525b86bdc08d2dcc262bdb497b87"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "ollama_proxy"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "chrono",
+ "clap",
+ "filetime",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
+ "rustls",
+ "rustls-pemfile",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "tokio",
+ "tokio-rustls",
 ]
 
 [[package]]

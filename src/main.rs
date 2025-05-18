@@ -1141,7 +1141,7 @@ async fn setup_server_listener(
 }
 
 // Run HTTP server implementation
-async fn run_http_server(
+async fn run_ollama_proxy(
     addr: SocketAddr,
     args: Args,
     logger: Arc<Logger>,
@@ -1405,7 +1405,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .await;
         }
 
-        run_http_server(addr, args, logger).await?;
+        run_ollama_proxy(addr, args, logger).await?;
     }
 
     Ok(())
