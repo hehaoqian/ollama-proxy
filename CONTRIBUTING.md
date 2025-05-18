@@ -20,6 +20,40 @@ cargo clippy
 
 Our CI pipeline will verify that your code follows these guidelines.
 
+## Running CI Locally
+
+You can run all CI checks locally with:
+
+```bash
+./run-ci.sh
+```
+
+This will run the same checks that the GitHub Actions workflows run, making sure your code is ready for submission.
+
+The script supports various options for more targeted checks:
+
+```bash
+# Run only format checking
+./run-ci.sh --format-only
+
+# Run only clippy linting
+./run-ci.sh --clippy-only
+
+# Include security audits (requires cargo-audit and cargo-outdated)
+./run-ci.sh --security
+
+# Run all tests, including ones marked as #[ignore]
+./run-ci.sh --test-only --include-ignored
+```
+
+See the [CI documentation](README.md#running-ci-locally) for more details.
+
+## Commit Messages
+
+We follow the [Conventional Commits](https://www.conventionalcommits.org/) specification for commit messages. Please read our [CONVENTIONAL_COMMITS.md](CONVENTIONAL_COMMITS.md) guide for details.
+
+This helps keep the commit history clean and generate accurate changelogs.
+
 ## Testing
 
 Please add tests for any new features or bug fixes. Run the test suite with:
@@ -38,9 +72,10 @@ cargo test -- --ignored
 
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+3. Commit your changes using conventional commits format
+4. Run the local CI script to verify your changes (`./run-ci.sh`)
+5. Push to the branch (`git push origin feature/amazing-feature`)
+6. Open a Pull Request using the provided PR template
 
 ## Continuous Integration
 

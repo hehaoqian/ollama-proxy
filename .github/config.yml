@@ -1,0 +1,15 @@
+# GitHub Repository Configuration
+
+# Configure merging options for PRs
+# Require squash merging and delete branch on merge
+merge_method: squash
+delete_branch_on_merge: true
+
+# Require PR template
+template:
+  - pull_request_template.md
+
+# Configure issue templates
+issue_templates:
+  - bug_report.md
+  - feature_request.md
