@@ -2,18 +2,18 @@ name: Rust CI
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [main]
   pull_request:
-    branches: [ main, master ]
+    branches: [main]
 
   schedule:
     # Run weekly on Monday at 00:00 UTC
-    - cron: '0 0 * * 1'
-  workflow_dispatch:  # Allow manual triggering
+    - cron: "0 0 * * 1"
+  workflow_dispatch: # Allow manual triggering
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: "-D warnings"  # Treat warnings as errors
+  RUSTFLAGS: "-D warnings"
 
 jobs:
   check:
@@ -25,13 +25,8 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
-      - name: Install Rust toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: stable
-          override: true
-          components: rustfmt, clippy
+      - name: Update to latest Rust
+        run: rustup update
 
       - name: Cache dependencies
         uses: actions/cache@v3
@@ -44,16 +39,10 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-
 
       - name: Check formatting
-        uses: actions-rs/cargo@v1
-        with:
-          command: fmt
-          args: --all -- --check
+        run: cargo fmt --all -- --check
 
       - name: Check with Clippy
-        uses: actions-rs/cargo@v1
-        with:
-          command: clippy
-          args: --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Run publish dry-run
         uses: actions-rs/cargo@v1
@@ -62,10 +51,7 @@ jobs:
           args: --dry-run
 
       - name: Run tests
-        uses: actions-rs/cargo@v1
-        with:
-          command: test
-          args: --all-features
+        run: cargo test --all-features
 
   docs:
     name: Build Documentation
@@ -77,12 +63,9 @@ jobs:
         run: rustup update
 
       - name: Build documentation
-        uses: actions-rs/cargo@v1
-        with:
-          command: doc
-          args: --no-deps --all-features --document-private-items
+        run: cargo doc --no-deps --all-features --document-private-items
         env:
-          RUSTDOCFLAGS: "-D warnings"  # Treat doc warnings as errors
+          RUSTDOCFLAGS: "-D warnings"
 
   msrv:
     name: Test Minimum Supported Rust Version (MSRV)
@@ -101,20 +84,12 @@ jobs:
           echo "msrv=$MSRV" >> $GITHUB_OUTPUT
 
       - name: Install MSRV toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: ${{ steps.msrv.outputs.msrv }}
-          override: true
+        run: |
+          rustup install ${{ steps.msrv.outputs.msrv }}
+          rustup default ${{ steps.msrv.outputs.msrv }}
 
       - name: Check with MSRV
-        uses: actions-rs/cargo@v1
-        with:
-          command: check
-          args: --all-features
+        run: cargo +${{ steps.msrv.outputs.msrv }} check
 
       - name: Test with MSRV
-        uses: actions-rs/cargo@v1
-        with:
-          command: test
-          args: --all-features
+        run: cargo +${{ steps.msrv.outputs.msrv }} test
