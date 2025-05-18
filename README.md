@@ -1,8 +1,8 @@
 # Ollama API Proxy Server
 
-[![Rust CI](https://github.com/yourusername/ollama-proxy/actions/workflows/rust-ci.yml/badge.svg)](https://github.com/yourusername/ollama-proxy/actions/workflows/rust-ci.yml)
-[![Security Audit](https://github.com/yourusername/ollama-proxy/actions/workflows/security-audit.yml/badge.svg)](https://github.com/yourusername/ollama-proxy/actions/workflows/security-audit.yml)
-[![Cross-Platform Tests](https://github.com/yourusername/ollama-proxy/actions/workflows/cross-platform.yml/badge.svg)](https://github.com/yourusername/ollama-proxy/actions/workflows/cross-platform.yml)
+[![Rust CI](https://github.com/hehaoqian/ollama-proxy/actions/workflows/rust-ci.yml/badge.svg)](https://github.com/hehaoqian/ollama-proxy/actions/workflows/rust-ci.yml)
+[![Security Audit](https://github.com/hehaoqian/ollama-proxy/actions/workflows/security-audit.yml/badge.svg)](https://github.com/hehaoqian/ollama-proxy/actions/workflows/security-audit.yml)
+[![Cross-Platform Tests](https://github.com/hehaoqian/ollama-proxy/actions/workflows/cross-platform.yml/badge.svg)](https://github.com/hehaoqian/ollama-proxy/actions/workflows/cross-platform.yml)
 
 This is a lightweight HTTP server that acts as a proxy for the Ollama API. It forwards requests to an Ollama server and provides additional features like API authentication, IP allowlisting, and HTTPS support.
 
