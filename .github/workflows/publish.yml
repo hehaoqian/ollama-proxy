@@ -3,7 +3,7 @@ name: Publish
 on:
   workflow_dispatch:
     inputs:
-      dry:
+      actual_release:
         description: 'Do actual publish'
         required: true
         default: false
@@ -46,13 +46,13 @@ jobs:
           rm -r target/
 
       - name: Publish using cargo
-        if: inputs.dry == false
+        if: inputs.actual_release == true
         run: cargo publish --locked
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
       - name: Publish using cargo fake
-        if: inputs.dry == true
+        if: inputs.actual_release == false
         run: cargo publish --locked --dry-run
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
