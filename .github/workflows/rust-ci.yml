@@ -55,6 +55,11 @@ jobs:
           command: clippy
           args: --all-targets --all-features -- -D warnings
 
+      - name: Run package
+        uses: actions-rs/cargo@v1
+        with:
+          command: package
+
       - name: Run tests
         uses: actions-rs/cargo@v1
         with:
