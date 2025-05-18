@@ -1248,7 +1248,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ollama_proxy"
+name = "ollama-proxy"
 version = "0.1.0"
 dependencies = [
  "bytes",

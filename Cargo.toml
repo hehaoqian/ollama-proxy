@@ -1,5 +1,5 @@
 [package]
-name = "ollama_proxy"
+name = "ollama-proxy"
 version = "0.1.0"
 edition = "2021"
 build = "build.rs"
@@ -7,7 +7,7 @@ description = "Proxy server for Ollama"
 repository = "https://github.com/hehaoqian/ollama-proxy"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
-default-run = "ollama_proxy"
+default-run = "ollama-proxy"
 rust-version = "1.82"
 keywords = ["ollama", "proxy"]
 categories = ["command-line-utilities", "web-programming::http-server"]

@@ -1,4 +1,4 @@
-// filepath: /home/main/src/ollama_proxy/src/db_logger.rs
+// filepath: /home/main/src/ollama-proxy/src/db_logger.rs
 use chrono::{DateTime, Utc};
 use hyper::{HeaderMap, Method, StatusCode};
 use serde::{Deserialize, Serialize};
