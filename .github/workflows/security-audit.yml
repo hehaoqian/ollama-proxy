@@ -36,12 +36,8 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
-      - name: Install Rust
-        uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: stable
-          override: true
+      - name: Update to latest Rust
+        run: rustup update
 
       - name: Install cargo-outdated
         run: cargo install cargo-outdated
