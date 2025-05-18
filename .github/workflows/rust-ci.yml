@@ -58,7 +58,6 @@ jobs:
       - name: Run publish dry-run second run
         if: runner.os == 'Linux'
         run: |
-          rm -r target/
           mkdir -p ${{ runner.temp }}
           sha256sum target/package/*.crate > ${{ runner.temp }}/SHA256SUMS.txt
           cat ${{ runner.temp }}/SHA256SUMS.txt
