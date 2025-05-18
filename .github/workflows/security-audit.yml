@@ -14,7 +14,7 @@ jobs:
     name: Security Audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Update to latest Rust
         run: rustup update
@@ -30,7 +30,7 @@ jobs:
     name: Analyze Dependencies
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Update to latest Rust
         run: rustup update
