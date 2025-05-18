@@ -4,8 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       dry:
-        description: 'Do not do actual publish'
+        description: 'Do actual publish'
         required: true
+        default: false
         type: boolean
 
 
