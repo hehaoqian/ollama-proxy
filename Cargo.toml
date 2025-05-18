@@ -9,6 +9,8 @@ license = "MIT OR Apache-2.0"
 readme = "README.md"
 default-run = "ollama_proxy"
 rust-version = "1.82"
+keywords = ["ollama", "proxy"]
+categories = ["command-line-utilities", "web-programming::http-server"]
 
 [features]
 default = ["database-logging"]
