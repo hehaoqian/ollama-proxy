@@ -72,7 +72,7 @@ jobs:
         if: runner.os == 'Linux'
         with:
           name: cargo-proxy
-          path: target/*/*.crate
+          path: target/package/ollama-proxy-*.crate
 
       - name: Run tests
         run: cargo test --locked --release --all-features
