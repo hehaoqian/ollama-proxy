@@ -23,6 +23,84 @@ This is a lightweight HTTP server that acts as a proxy for the Ollama API. It fo
 - **Logging:** Console and file logging options
 - **Database Logging:** Optional request and response logging to SQLite database
 
+## Installation
+
+### System dependency
+
+This project depends on the SQLite C library and development headers (the package that provides `sqlite3.h` and the SQLite library). Install the appropriate system package for your platform before building.
+
+Common packages:
+
+- **Debian / Ubuntu:** `libsqlite3-dev`
+	```bash
+	sudo apt-get update
+	sudo apt-get install -y libsqlite3-dev build-essential pkg-config
+	```
+
+- **Fedora / RHEL / CentOS:** `sqlite-devel`
+	```bash
+	sudo dnf install -y sqlite-devel pkgconfig gcc make
+	```
+
+- **Alpine Linux:** `sqlite-dev`
+	```bash
+	sudo apk add --no-cache sqlite-dev build-base pkgconfig
+	```
+
+- **Arch Linux:** `sqlite` (includes headers)
+	```bash
+	sudo pacman -Syu sqlite base-devel pkgconf
+	```
+
+- **macOS (Homebrew):** `sqlite`
+	```bash
+	brew install sqlite pkg-config
+	```
+
+- **Windows:**
+	- Option A (MSYS2):
+		```powershell
+		pacman -S mingw-w64-x86_64-toolchain mingw-w64-x86_64-sqlite3 pkg-config
+		```
+		Then build using the *MINGW64* shell so the toolchain and headers are discoverable.
+	- Option B (vcpkg):
+		```powershell
+		vcpkg install sqlite3
+		# ensure VCPKG_ROOT is set and integrate with your build environment
+		```
+
+If you prefer not to install system packages, `libsqlite3-sys` can be built with a bundled SQLite by enabling its `bundled` feature in `Cargo.toml` (see below).
+
+### Vendored / Bundled SQLite (optional)
+
+If installing native packages is inconvenient (CI, containers, or Windows without MSYS2), enable the bundled SQLite feature for the crate that pulls in `libsqlite3-sys`. Example (add or override the dependency in your `Cargo.toml`):
+
+```toml
+[dependencies]
+# If you directly depend on libsqlite3-sys (or override the transitive dep), enable bundled:
+libsqlite3-sys = { version = "*", features = ["bundled"] }
+```
+
+Note: using a wildcard version (`"*"`) above is only an example — prefer the specific version used by your project dependency tree or add a `[patch.crates-io]` override if necessary.
+
+### Build & Run
+
+After installing system dependencies (or enabling `bundled`), build and run the server:
+
+```bash
+# build (use --release for optimized binary)
+cargo build --all-features
+
+# run with example args
+cargo run -- --port 3001 --ollama-url http://localhost:11434
+```
+
+If you want to disable database logging at build time (it is a compile-time feature), build without default features:
+
+```bash
+cargo build --no-default-features
+```
+
 ## Usage
 
 ### Basic HTTP Server
